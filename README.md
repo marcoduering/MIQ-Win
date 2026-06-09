@@ -47,6 +47,13 @@ MIQ-Win is a lightweight convenience tool for quickly inspecting medical image f
 
 Press **Space** on any supported file to get an instant preview. Navigate between files with the arrow keys, as with any other QuickLook plugin.
 
+The preview is interactive:
+
+- **Scroll** the mouse wheel over any pane to move through that plane's slices.
+- **Click** (or drag) in a pane to set the focus point; all three planes link to it, with crosshairs marking the spot.
+- **Right-click + drag** to adjust the intensity window/level (brightness/contrast).
+- **Alt + scroll** to step through volumes of a 4-D series.
+
 > [!NOTE]
 > Advancing between files with the arrow keys requires Explorer to keep keyboard focus. Interacting with the preview by click takes that focus away. Use only the scroll wheel to keep the keyboard focus on Explorer. If the arrow keys stop switching files, click back in the Explorer file list.
 
