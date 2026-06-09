@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- QuickLook 4.5 is a .NET Framework 4.6.2 app; the plugin must match it.
+         Buildable here without the Developer Pack via the reference-assemblies
+         NuGet below (no admin); the installed 4.8 runtime executes it. -->
+    <TargetFramework>net462</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <RootNamespace>QuickLook.Plugin.MIQ</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- .NET Framework reference assemblies as a NuGet (no Developer Pack /
+         admin needed). Build-time only. -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <!-- Span<T> + System.Buffers.Binary.BinaryPrimitives backport for net462. -->
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+    <!-- ValueTuple ((int,int) returns) — not in the net462 BCL. -->
+    <PackageReference Include="System.ValueTuple" Version="4.5.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Native fast gzip (libdeflate, x64). Shipped beside the plugin DLL;
+         loaded by full path at runtime. -->
+    <None Include="native\libdeflate.dll" Link="libdeflate.dll"
+          CopyToOutputDirectory="PreserveNewest" />
+    <!-- QuickLook reads this at install time (requires a non-empty <Version>).
+         Copied into the package by Package.ps1, which zips bin\Release. -->
+    <None Include="QuickLook.Plugin.Metadata.config"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Shared parser + renderer sources from MIQ.Core, retargeted to net462.
+         Source-linked (not a ProjectReference) because the core targets net8
+         and the polyfills + net462 BCL backports only apply in this project. -->
+    <Compile Include="..\MIQ.Core\Parsing\*.cs" />
+    <Compile Include="..\MIQ.Core\Rendering\*.cs" />
+  </ItemGroup>
+
+  <!-- Provided by QuickLook at runtime — do not copy into the plugin folder.
+       Vendored under lib/ so local and CI builds need no installed QuickLook. -->
+  <ItemGroup>
+    <Reference Include="QuickLook.Common">
+      <HintPath>..\lib\QuickLook.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

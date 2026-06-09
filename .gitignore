@@ -1,0 +1,41 @@
+# .NET build output
+bin/
+obj/
+
+# Packaging output (.qlplugin artifacts)
+dist/
+
+# NuGet
+*.nupkg
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# VS Code
+.vscode/
+
+# Debug symbols (generated on build)
+*.pdb
+
+# Rider
+.idea/
+
+# Claude Code local state
+.claude/
+# Local-only contributor guidance (contains machine paths / internal notes)
+CLAUDE.md
+
+# Editor/tooling caches
+*.lscache
+
+# OS
+Thumbs.db
+.DS_Store

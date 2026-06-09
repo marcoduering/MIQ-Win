@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- .NET 8 reference build of the MIQ parser + renderer. The shipping preview
+       path is the QuickLook plugin (QuickLook.Plugin.MIQ), which source-links
+       these files retargeted to net462; keeping this second target catches
+       net8/net462 divergence early. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>MIQ</RootNamespace>
+    <AssemblyName>MIQ.Core</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+</Project>
