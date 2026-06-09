@@ -58,8 +58,8 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
     private readonly Dictionary<int, IntensityWindow.Bounds?> _windowCache;
     private CancellationTokenSource? _windowCts;
 
-    // Live intensity window. Starts at the pooled 2/98 window; right-drag or
-    // Alt+left-drag adjusts it. _winRev bumps on every change so the per-plane
+    // Live intensity window. Starts at the pooled 2/98 window; right-drag
+    // adjusts it. _winRev bumps on every change so the per-plane
     // cache knows to re-extract.
     private readonly bool _hasWindow;
     private double _winLow, _winHigh;

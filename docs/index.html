@@ -127,6 +127,8 @@
   }
   .shot picture { display: block; }
   .shot img { display: block; width: 100%; height: auto; }
+  .shot-hint { text-align: center; color: var(--fg-faint); font-size: .9rem; margin: 16px auto 0; max-width: 80ch; }
+  .shot-hint kbd { font-size: .82em; }
 
   /* ---- requires banner ---- */
   .requires {
@@ -260,7 +262,7 @@
   <div class="wrap">
     <span class="pill"><span class="dot"></span> Free &amp; open source · MIT licensed</span>
     <h1>Preview medical images,<br>right from Explorer.</h1>
-    <p class="lede">MIQ-Win is a lightweight plugin for <a href="https://github.com/QL-Win/QuickLook">QuickLook</a> that previews medical volume images on Windows. Press <kbd>Space</kbd> on a supported file in Windows Explorer to instantly get an interactive orthogonal slice view alongside a metadata panel. No app to open, no waiting.</p>
+    <p class="lede">MIQ-Win is a lightweight plugin for <a href="https://github.com/QL-Win/QuickLook">QuickLook</a> that previews medical volume images on Windows. Press <kbd>Space</kbd> on a supported file in Windows Explorer to instantly get an interactive orthogonal slice view alongside a metadata panel. Scroll to move through the volume, click to navigate. No app to open, no waiting.</p>
     <div class="cta">
       <a class="btn" href="https://github.com/marcoduering/MIQ-Win/releases/latest/download/QuickLook.Plugin.MIQ.qlplugin">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -279,6 +281,7 @@
     <div class="shot">
       <img src="MIQ-Win_screenshot.webp" alt="MIQ-Win QuickLook preview showing a orthogonal slice grid and metadata panel" loading="eager">
     </div>
+    <p class="shot-hint">The preview is live: scroll to move through slices, click any pane to link all three, right-click+drag to adjust window/level, <kbd>Alt</kbd>+scroll to step through 4-D volumes.</p>
   </div>
 </section>
 
@@ -305,9 +308,9 @@
         <p>Native QuickLook integration. Select a file in Explorer, hit <kbd>Space</kbd>, and the orthogonal slices appear instantly.</p>
       </div>
       <div class="card">
-        <span class="ic">🧊</span>
-        <h3>Orthogonal view</h3>
-        <p>Coronal, sagittal and axial slices in one grid, with a metadata panel alongside.</p>
+        <span class="ic">🖱️</span>
+        <h3>Interactive, not a snapshot</h3>
+        <p>Coronal, sagittal and axial in one grid. Scroll over any pane to move through slices, click to link all three to the same point, right-click+drag to adjust window/level, <kbd>Alt</kbd>+scroll to step through 4-D volumes.</p>
       </div>
       <div class="card">
         <span class="ic">⚡</span>
