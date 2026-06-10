@@ -33,6 +33,9 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
 
     // Non-readonly so ExpandVolume() can swap in the full volume.
     private MiqVolume _vol;
+    // Non-null when this is a coloured segmentation: slices map labels → RGB
+    // through it instead of intensity windowing. Re-supplied on ExpandVolume.
+    private SegmentationLut? _lut;
     private readonly IReadOnlyList<MetadataEntry> _metadata;
     private readonly MiqRenderingOptions _options;
     private readonly MiqSettings _settings;
@@ -85,6 +88,7 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
     internal MiqTriPlanarControl(
         MiqVolume volume,
         IntensityWindow.Bounds? window,
+        SegmentationLut? lut,
         IReadOnlyDictionary<SlicePlane, CenterSlice> initial,
         IReadOnlyList<MetadataEntry> metadata,
         MiqRenderingOptions options,
@@ -94,6 +98,7 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         Action? onExpandRequested = null)
     {
         _vol = volume;
+        _lut = lut;
         _metadata = metadata;
         _options = options;
         _settings = settings;
@@ -143,11 +148,12 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
     /// Swaps in the fully-decompressed volume (called from the UI thread once
     /// background expansion finishes). Enables the volume scrubber.
     /// </summary>
-    internal void ExpandVolume(MiqVolume vol)
+    internal void ExpandVolume(MiqVolume vol, SegmentationLut? lut = null)
     {
         _windowCts?.Cancel();
         _windowCts = null;
         _vol = vol;
+        _lut = lut;
         _isExpanded = true;
         _cache.Clear(); // old slices came from partial storage — discard
         // Volume 0's window is valid for both partial and full storage (same
@@ -174,7 +180,7 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         if (_cache.TryGetValue(plane, out var c) &&
             c.index == want && c.vol == _volumeIndex && c.rev == _winRev)
             return c.slice;
-        var slice = _vol.ExtractSlice(plane, want, CurrentWindow(), timepoint: _volumeIndex);
+        var slice = _vol.ExtractSlice(plane, want, CurrentWindow(), _lut, timepoint: _volumeIndex);
         _cache[plane] = (want, _volumeIndex, _winRev, slice);
         return slice;
     }
@@ -379,7 +385,9 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         if (next == _volumeIndex) return;
         _volumeIndex = next;
         _interacted = true;
-        if (_perVolumeWindow) RequestWindowForVolume(next);
+        // Segmentation mode has no intensity window (labels map via the LUT, which
+        // is volume-independent), so skip the per-volume recompute entirely.
+        if (_perVolumeWindow && _hasWindow) RequestWindowForVolume(next);
         InvalidateVisual();
     }
 

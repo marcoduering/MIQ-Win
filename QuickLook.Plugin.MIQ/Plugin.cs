@@ -97,15 +97,18 @@ public sealed class Plugin : IViewer
 
                 var fmt = image.Header.FormatLabel ?? kind?.DisplayName() ?? "Unknown";
                 var volume = new MiqVolume(image, options.Orientation);
-                var window = volume.SharedWindow(options);
+                // Segmentation colouring (opt-in) replaces intensity windowing for
+                // detected integer label volumes; the window is then unused.
+                var lut = volume.BuildSegmentationLut(options);
+                var window = lut is null ? volume.SharedWindow(options) : null;
                 var initial = new Dictionary<SlicePlane, CenterSlice>
                 {
                     [SlicePlane.Coronal] = volume.ExtractSlice(
-                        SlicePlane.Coronal, volume.CenterIndex(SlicePlane.Coronal), window),
+                        SlicePlane.Coronal, volume.CenterIndex(SlicePlane.Coronal), window, lut),
                     [SlicePlane.Sagittal] = volume.ExtractSlice(
-                        SlicePlane.Sagittal, volume.CenterIndex(SlicePlane.Sagittal), window),
+                        SlicePlane.Sagittal, volume.CenterIndex(SlicePlane.Sagittal), window, lut),
                     [SlicePlane.Axial] = volume.ExtractSlice(
-                        SlicePlane.Axial, volume.CenterIndex(SlicePlane.Axial), window),
+                        SlicePlane.Axial, volume.CenterIndex(SlicePlane.Axial), window, lut),
                 };
                 var orientation = image.Header.OrientationFrame?.Label;
                 var metadata = settings.SelectMetadata(
@@ -127,7 +130,7 @@ public sealed class Plugin : IViewer
                         ? () => StartExpansion(path, options, control, view, cts.Token)
                         : (Action?)null;
                     view = new MiqTriPlanarControl(
-                        volume, window, initial, metadata, options, settings,
+                        volume, window, lut, initial, metadata, options, settings,
                         isExpanded: volume.IsExpanded,
                         expansionBlocked: image.ExpansionBlocked,
                         onExpandRequested: onExpand);
@@ -165,11 +168,14 @@ public sealed class Plugin : IViewer
                 if (token.IsCancellationRequested) return;
                 var fullImage = MiqParser.Parse(path, token);
                 var fullVolume = new MiqVolume(fullImage, options.Orientation);
+                // Re-detect on the full volume so the scrubbed timepoints colour
+                // consistently (the LUT is label-keyed, so this matches volume 0).
+                var fullLut = fullVolume.BuildSegmentationLut(options);
                 control.Dispatcher.BeginInvoke(() =>
                 {
                     if (token.IsCancellationRequested) return;
                     _volume = fullVolume;
-                    view.ExpandVolume(fullVolume);
+                    view.ExpandVolume(fullVolume, fullLut);
                 });
             }
             catch (Exception) { /* cancelled, or viewer cleaned up */ }

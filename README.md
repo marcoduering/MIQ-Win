@@ -59,7 +59,7 @@ The preview is interactive:
 
 ### Customization
 
-Preferences live in a plain-text **`MIQ.settings.ini`** — adjust intensity scaling, view orientation, label colors, and the metadata panel (content and order of items). Changes apply on the next preview, no restart required. The file is kept in QuickLook's data folder so it survives updates; to open that folder, right-click the QuickLook tray icon and choose **Open Data Folder** (your `MIQ.settings.ini` is inside). A `MIQ settings location.txt` breadcrumb in the plugin folder also points to it.
+Preferences live in a plain-text **`MIQ.settings.ini`** — adjust intensity scaling, view orientation, segmentation coloring, axis-label colors, and the metadata panel (content and order of items). Changes apply on the next preview, no restart required. The file is kept in QuickLook's data folder so it survives updates; to open that folder, right-click the QuickLook tray icon and choose **Open Data Folder** (your `MIQ.settings.ini` is inside). A `MIQ settings location.txt` breadcrumb in the plugin folder also points to it.
 
 ### Orientation
 
@@ -72,6 +72,16 @@ For files that carry orientation metadata, two canonical anatomical views are al
 - **radiological**: same, but patient-LEFT on the viewer's right.
 
 Files without orientation metadata always fall back to the stored view.
+
+### Segmentation coloring
+
+By default, every file is shown as grayscale. For **integer label maps** (segmentations), MIQ-Win can instead color each label, enabled via the `SegmentationColors` key in `MIQ.settings.ini`:
+
+- **off** (default): grayscale, as before.
+- **auto**: detected label volumes are colored. **FreeSurfer** segmentations (`aseg`/`aparc`) use their canonical colors; other label maps get distinct per-label colors. A binary mask (single label) is shown white.
+- **random**: as auto, but always uses per-label colors (never the FreeSurfer palette).
+
+Detection is conservative, so ordinary intensity images should stay grayscale.
 
 ### Performance
 

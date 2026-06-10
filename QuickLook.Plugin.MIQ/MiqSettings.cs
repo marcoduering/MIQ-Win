@@ -60,6 +60,13 @@ internal sealed class MiqSettings
     // flip). Files without an OrientationFrame always fall back to Stored.
     public MiqOrientation Orientation { get; private set; } = MiqOrientation.Stored;
 
+    // Colour integer segmentation/label volumes instead of percentile-windowing
+    // them. Off (default) preserves the legacy grayscale path for every file;
+    // auto detects label volumes and colours them (canonical FreeSurfer palette
+    // when the labels match a FreeSurfer parcellation, else a categorical random
+    // palette); random forces the random palette and never uses FreeSurfer colours.
+    public MiqSegmentationColoring Segmentation { get; private set; } = MiqSegmentationColoring.Off;
+
     public double IntensityPercentileLow { get; private set; } = 2.0;
     public double IntensityPercentileHigh { get; private set; } = 98.0;
     // When true, the intensity window is recomputed for each volume as the
@@ -82,7 +89,7 @@ internal sealed class MiqSettings
     public Brush ScrubberKnobBrush { get; private set; } = null!;
 
     public MiqRenderingOptions Options =>
-        new(IntensityPercentileLow, IntensityPercentileHigh, Orientation);
+        new(IntensityPercentileLow, IntensityPercentileHigh, Orientation, Segmentation);
 
     private MiqSettings() { }
 
@@ -95,7 +102,11 @@ internal sealed class MiqSettings
             if (path == null) { s.Resolve(); return s; }
 
             if (File.Exists(path))
-                s.Apply(Parse(File.ReadAllLines(path)));
+            {
+                var map = Parse(File.ReadAllLines(path));
+                s.Apply(map);
+                s.MigrateMissingKeys(path, map); // append keys added since this ini was written
+            }
             else
                 TryWrite(path, s.DefaultText());
 
@@ -201,6 +212,7 @@ internal sealed class MiqSettings
         MetadataValueColor = Col(m, "MetadataValueColor", MetadataValueColor);
         ShowDisclaimer = Flag(m, "ShowDisclaimer", ShowDisclaimer);
         Orientation = OrientationOf(m, "Orientation", Orientation);
+        Segmentation = SegmentationOf(m, "SegmentationColors", Segmentation);
         IntensityPercentileLow = Num(m, "IntensityPercentileLow", IntensityPercentileLow);
         IntensityPercentileHigh = Num(m, "IntensityPercentileHigh", IntensityPercentileHigh);
         PerVolumeWindow = Flag(m, "PerVolumeWindow", PerVolumeWindow);
@@ -259,6 +271,50 @@ internal sealed class MiqSettings
         MiqOrientation.Radiological => "radiological",
         _ => "stored",
     };
+
+    private static MiqSegmentationColoring SegmentationOf(
+        IReadOnlyDictionary<string, string> m, string k, MiqSegmentationColoring def)
+    {
+        if (!m.TryGetValue(k, out var v)) return def;
+        switch (v.Trim().ToLowerInvariant())
+        {
+            case "off": case "false": case "0": case "no": return MiqSegmentationColoring.Off;
+            case "auto": case "on": case "true": case "1": case "yes": return MiqSegmentationColoring.Auto;
+            case "random": return MiqSegmentationColoring.Random;
+            default: return def;
+        }
+    }
+
+    private static string SegmentationName(MiqSegmentationColoring s) => s switch
+    {
+        MiqSegmentationColoring.Auto => "auto",
+        MiqSegmentationColoring.Random => "random",
+        _ => "off",
+    };
+
+    // The SegmentationColors block (comments + key), shared by DefaultText and the
+    // one-time migration below so they can never drift.
+    private string SegmentationSettingText() => string.Join("\r\n",
+        "; Segmentation colours: off | auto | random",
+        ";   off     percentile-window every file as grayscale (default).",
+        ";   auto    detect integer label volumes and colour them, canonical",
+        ";           FreeSurfer colours when the labels match a FreeSurfer",
+        ";           parcellation (aseg/aparc), otherwise random per-label",
+        ";           colours. Plain intensity images are left grayscale.",
+        ";   random  as auto, but always random colours (ignore FreeSurfer).",
+        $"SegmentationColors      = {SegmentationName(Segmentation)}");
+
+    // Append any setting added after the user's ini was first written, so an
+    // upgraded user sees the new key documented in their own file. Runs on every
+    // load but only does a dictionary lookup; it writes (once) solely when the key
+    // is genuinely absent, after which the key is present and this no-ops.
+    private void MigrateMissingKeys(string path, IReadOnlyDictionary<string, string> existing)
+    {
+        if (existing.ContainsKey("SegmentationColors")) return; // added in 1.1
+        var block = "\r\n; --- added by a newer MIQ version ---\r\n"
+                    + SegmentationSettingText() + "\r\n";
+        try { File.AppendAllText(path, block); } catch { /* read-only dir: harmless */ }
+    }
 
     private static double Num(IReadOnlyDictionary<string, string> m, string k, double def) =>
         m.TryGetValue(k, out var v) &&
@@ -325,6 +381,8 @@ internal sealed class MiqSettings
             "; Sagittal is identical in both (Anterior on the left). Files without",
             "; orientation metadata always fall back to stored.",
             $"Orientation             = {OrientationName(Orientation)}",
+            "",
+            SegmentationSettingText(),
             "",
             "; Intensity window — contrast mapping as percentiles (0-100) of voxel",
             "; values pooled across all slices. Narrow [low, high] for more contrast,",

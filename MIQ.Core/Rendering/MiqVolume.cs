@@ -9,6 +9,15 @@ namespace MIQ.Rendering;
 /// Port of MIQCore's ViewOrientation (persisted as "stored"/"ras"/"las").
 public enum MiqOrientation { Stored, Neurological, Radiological }
 
+/// Label-colouring mode for integer segmentation volumes. <c>Off</c> always
+/// percentile-windows (legacy). <c>Auto</c> colours a detected label volume —
+/// canonical FreeSurfer colours when the labels look like a FreeSurfer parcellation,
+/// otherwise deterministic random colours. <c>Random</c> forces random colours and
+/// never consults the FreeSurfer table. Detection (see
+/// <see cref="MiqVolume.BuildSegmentationLut"/>) only ever fires for integer,
+/// identity-scaled data with few distinct values, so intensity images are unaffected.
+public enum MiqSegmentationColoring { Off, Auto, Random }
+
 // Percentiles are computed over voxels pooled from all three center slices
 // (see CenterSlices) so every plane shares one intensity window. 2/98 clips
 // the histogram tails (noise, sparse hyper-intensities) harder than 1/99 for
@@ -16,7 +25,8 @@ public enum MiqOrientation { Stored, Neurological, Radiological }
 public readonly record struct MiqRenderingOptions(
     double LowerPercentile = 2.0,
     double UpperPercentile = 98.0,
-    MiqOrientation Orientation = MiqOrientation.Stored);
+    MiqOrientation Orientation = MiqOrientation.Stored,
+    MiqSegmentationColoring Segmentation = MiqSegmentationColoring.Off);
 
 /// Resolved slicing for one plane under the active orientation: which storage
 /// axis is perpendicular (Slice) and which map to display horizontal (H) /
@@ -35,8 +45,10 @@ public sealed class CenterSlice(SliceImage image, SliceOrientationLabels labels)
 
 /// Wraps a parsed image and extracts the three center slices with a shared
 /// intensity window. Grayscale datatypes are percentile-windowed; rgb24/rgba32
-/// are rendered as opaque RGB (alpha dropped) and bypass windowing. Port of
-/// MIQCore's MIQVolume.
+/// are rendered as opaque RGB (alpha dropped) and bypass windowing. When a
+/// <see cref="SegmentationLut"/> is supplied (see <see cref="BuildSegmentationLut"/>),
+/// grayscale label values are mapped to RGB through the LUT instead of windowed.
+/// Port of MIQCore's MIQVolume.
 public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOrientation.Stored)
 {
     private readonly MiqImage _image = image;
@@ -136,6 +148,7 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         MiqRenderingOptions options, int maxDimension = 512)
     {
         var planes = new[] { SlicePlane.Coronal, SlicePlane.Sagittal, SlicePlane.Axial };
+        var lut = BuildSegmentationLut(options);
 
         var prepared = new List<(SlicePlane plane, PreparedSlice p)>();
         var pooled = new List<float>();
@@ -146,17 +159,23 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
             if (p.Gray is { } g) pooled.AddRange(g); // RGB slices bypass pooling
         }
 
-        var bounds = IntensityWindow.GetBounds(pooled, options.LowerPercentile, options.UpperPercentile);
+        // Label volumes map through the LUT, not the intensity window.
+        var bounds = lut is null
+            ? IntensityWindow.GetBounds(pooled, options.LowerPercentile, options.UpperPercentile)
+            : (IntensityWindow.Bounds?)null;
 
         var result = new Dictionary<SlicePlane, CenterSlice>();
         foreach (var (plane, p) in prepared)
-            result[plane] = new CenterSlice(Finalize(p, bounds, maxDimension), p.Cfg.Labels);
+            result[plane] = new CenterSlice(Finalize(p, bounds, lut, maxDimension), p.Cfg.Labels);
         return result;
     }
 
-    // Turn a prepared slice into a finished image: RGB → opaque RgbImage (no
-    // window); grayscale → windowed GrayscaleImage. Both are FOV-resampled.
-    private static SliceImage Finalize(PreparedSlice p, IntensityWindow.Bounds? window, int maxDimension)
+    // Turn a prepared slice into a finished image: native RGB → opaque RgbImage
+    // (no window); a label slice with a LUT → RGB via the LUT; otherwise grayscale
+    // → windowed GrayscaleImage. All paths are FOV-resampled (nearest-neighbour,
+    // so labels are never blended across boundaries).
+    private static SliceImage Finalize(
+        PreparedSlice p, IntensityWindow.Bounds? window, SegmentationLut? lut, int maxDimension)
     {
         var cfg = p.Cfg;
         if (p.Rgb is { } rgb)
@@ -164,6 +183,19 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
                 .ResampledForPixelSpacing(cfg.PixelSpacingX, cfg.PixelSpacingY, p.MaxExt, maxDimension));
 
         var values = p.Gray!;
+        if (lut is { } colors)
+        {
+            var seg = new byte[values.Length * 3];
+            for (var i = 0; i < values.Length; i++)
+            {
+                var v = values[i];
+                var label = MiqCompat.IsFinite(v) ? MiqCompat.RoundToInt(v) : 0;
+                colors.Write(label, seg, i * 3);
+            }
+            return SliceImage.FromRgb(new RgbImage(cfg.SliceWidth, cfg.SliceHeight, seg)
+                .ResampledForPixelSpacing(cfg.PixelSpacingX, cfg.PixelSpacingY, p.MaxExt, maxDimension));
+        }
+
         var pixels = window is { } b ? IntensityWindow.Apply(values, b) : new byte[values.Length];
         return SliceImage.Gray(new GrayscaleImage(cfg.SliceWidth, cfg.SliceHeight, pixels)
             .ResampledForPixelSpacing(cfg.PixelSpacingX, cfg.PixelSpacingY, p.MaxExt, maxDimension));
@@ -228,14 +260,203 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         return IntensityWindow.GetBounds(pooled, options.LowerPercentile, options.UpperPercentile);
     }
 
-    /// Extract a single slice at an arbitrary index using a precomputed window.
+    /// Extract a single slice at an arbitrary index using a precomputed window
+    /// (intensity data) or a precomputed <paramref name="lut"/> (label data). The
+    /// LUT is built once per volume so every plane, slice and timepoint share it.
     public CenterSlice ExtractSlice(
         SlicePlane plane, int sliceIndex, IntensityWindow.Bounds? window,
-        int maxDimension = 512, int timepoint = 0)
+        SegmentationLut? lut = null, int maxDimension = 512, int timepoint = 0)
     {
         var p = PrepareSlice(plane, sliceIndex, timepoint);
-        return new CenterSlice(Finalize(p, window, maxDimension), p.Cfg.Labels);
+        return new CenterSlice(Finalize(p, window, lut, maxDimension), p.Cfg.Labels);
     }
+
+    /// Decide whether this volume should be rendered as a coloured segmentation
+    /// and, if so, build the shared label→RGB LUT. Returns null (→ percentile
+    /// windowing) when colouring is Off, the datatype/scaling is intensity-like,
+    /// or the sampled center slices don't look like integer labels.
+    ///
+    /// Detection is deliberately conservative: only integer or float datatypes
+    /// with identity scaling are considered, every sampled value must be integral
+    /// (so a float intensity image with continuous values is rejected), and the
+    /// distinct-label count must stay under <see cref="SegmentationLut.MaxLabels"/>
+    /// — so a real intensity image (many distinct or fractional values) is never
+    /// miscoloured. Sampling reuses the three center slices (the same voxels the
+    /// intensity window pools), so detection adds no extra read on the off path.
+    /// The one exception is a single-label center sample, which triggers a
+    /// full-volume-0 confirm before committing to the binary (white) LUT — see
+    /// <see cref="ScanVolume0"/>.
+    public SegmentationLut? BuildSegmentationLut(MiqRenderingOptions options)
+    {
+        if (options.Segmentation == MiqSegmentationColoring.Off) return null;
+        if (!IsLabelCandidateDatatype(H.Datatype)) return null;
+        // Non-identity scaling means the stored values are intensity, not labels.
+        if (H.SclInter != 0f || (H.SclSlope != 0f && H.SclSlope != 1f)) return null;
+
+        var labels = new HashSet<int>();
+        foreach (var plane in new[] { SlicePlane.Coronal, SlicePlane.Sagittal, SlicePlane.Axial })
+        {
+            if (PrepareSlice(plane).Gray is not { } g) return null; // RGB: not labels
+            foreach (var v in g)
+            {
+                if (!MiqCompat.IsFinite(v)) continue;
+                var label = MiqCompat.RoundToInt(v);
+                if (Math.Abs(v - label) > 1e-3f) return null;        // fractional → intensity
+                if (labels.Add(label) && labels.Count > SegmentationLut.MaxLabels)
+                    return null;                                     // too many → intensity
+            }
+        }
+        labels.Remove(0); // background is always black; only foreground labels colour
+        if (labels.Count == 0) return null;
+
+        // A binary mask (one foreground label) reads best as plain white — a
+        // palette colour conveys nothing when there's only one structure. The
+        // center slices can MISS a spatially localized second structure, so a
+        // single-label center sample is only provisional: confirm it against the
+        // whole first volume before committing to the (sticky) monochrome LUT.
+        if (labels.Count == 1)
+        {
+            switch (ScanVolume0(GetSingle(labels)))
+            {
+                case Vol0LabelShape.Intensity: return null;           // periphery is fractional → not labels
+                case Vol0LabelShape.Binary:
+                    return new SegmentationLut(useFreeSurfer: false, monochromeWhite: true);
+                // MultiLabel → fall through and colour as a normal label volume.
+            }
+        }
+
+        var useFreeSurfer = options.Segmentation == MiqSegmentationColoring.Auto
+            && SegmentationLut.LooksLikeFreeSurfer(labels);
+        return new SegmentationLut(useFreeSurfer);
+    }
+
+    private enum Vol0LabelShape { Intensity, Binary, MultiLabel }
+
+    private static int GetSingle(HashSet<int> set)
+    {
+        foreach (var v in set) return v;
+        return 0;
+    }
+
+    // Confirm the binary-vs-multi decision against the ENTIRE first volume. Only
+    // called when the center sample already looks binary (exactly one foreground
+    // label), so the common multi-label and intensity files never reach it. Returns
+    // the instant a disqualifying voxel appears (a second distinct non-zero label
+    // -> MultiLabel, or a fractional value -> Intensity), so only a true binary mask
+    // scans to completion. Volume 0 is fully present even on partial vol-0-first
+    // loads (the payload is sized to it).
+    private Vol0LabelShape ScanVolume0(int label)
+    {
+        // MIF custom strides: volume 0's elements may be interleaved with other
+        // volumes, so fall back to the correct (slower) per-voxel walk. Standard
+        // row-major formats (NIfTI/MGH/NRRD) take the fast contiguous path below.
+        if (_image.ElementStrides is not null)
+            return ScanVolume0PerVoxel(label);
+
+        // Volume 0 is the first N payload elements, contiguous. The binary question
+        // depends only on which values are present, not their position, so scan the
+        // raw buffer sequentially with the datatype switch hoisted OUT of the loop
+        // and integers compared directly (no VoxelElementIndex, no bounds checks per
+        // voxel, no float conversion for integer data).
+        var s = _image.Storage;
+        var bpv = H.Datatype.BytesPerVoxel();
+        var elems = Math.Min((long)Width * Height * Depth, (long)_image.PayloadCount / bpv);
+        var le = H.LittleEndian;
+        long p = _image.PayloadOffset;
+        var end = p + elems * bpv;
+
+        static int Rd16(byte[] a, long o, bool le) =>
+            le ? a[o] | (a[o + 1] << 8) : (a[o] << 8) | a[o + 1];
+        static int Rd32(byte[] a, long o, bool le) =>
+            le ? a[o] | (a[o + 1] << 8) | (a[o + 2] << 16) | (a[o + 3] << 24)
+               : (a[o] << 24) | (a[o + 1] << 16) | (a[o + 2] << 8) | a[o + 3];
+        static long Rd64(byte[] a, long o, bool le)
+        {
+            long lo = (uint)Rd32(a, o, le), hi = (uint)Rd32(a, o + 4, le);
+            return le ? (hi << 32) | lo : (lo << 32) | hi;
+        }
+
+        switch (H.Datatype)
+        {
+            case MiqDatatype.Uint8:
+                for (var o = p; o < end; o += 1)
+                { int v = s[o]; if (v != 0 && v != label) return Vol0LabelShape.MultiLabel; }
+                break;
+            case MiqDatatype.Int8:
+                for (var o = p; o < end; o += 1)
+                { int v = (sbyte)s[o]; if (v != 0 && v != label) return Vol0LabelShape.MultiLabel; }
+                break;
+            case MiqDatatype.Uint16:
+                for (var o = p; o < end; o += 2)
+                { int v = Rd16(s, o, le); if (v != 0 && v != label) return Vol0LabelShape.MultiLabel; }
+                break;
+            case MiqDatatype.Int16:
+                for (var o = p; o < end; o += 2)
+                { int v = (short)Rd16(s, o, le); if (v != 0 && v != label) return Vol0LabelShape.MultiLabel; }
+                break;
+            case MiqDatatype.Int32:
+            case MiqDatatype.Uint32: // label values are small; signed compare is exact for them
+                for (var o = p; o < end; o += 4)
+                { int v = Rd32(s, o, le); if (v != 0 && v != label) return Vol0LabelShape.MultiLabel; }
+                break;
+            case MiqDatatype.Float32:
+                for (var o = p; o < end; o += 4)
+                {
+                    var f = MiqCompat.Int32BitsToSingle(Rd32(s, o, le));
+                    if (!MiqCompat.IsFinite(f)) continue;
+                    var r = MiqCompat.RoundToInt(f);
+                    if (Math.Abs(f - r) > 1e-3f) return Vol0LabelShape.Intensity;
+                    if (r != 0 && r != label) return Vol0LabelShape.MultiLabel;
+                }
+                break;
+            case MiqDatatype.Float64:
+                for (var o = p; o < end; o += 8)
+                {
+                    var d = MiqCompat.Int64BitsToDouble(Rd64(s, o, le));
+                    if (double.IsNaN(d) || double.IsInfinity(d)) continue;
+                    var r = (int)Math.Round(d, MidpointRounding.ToEven);
+                    if (Math.Abs(d - r) > 1e-3) return Vol0LabelShape.Intensity;
+                    if (r != 0 && r != label) return Vol0LabelShape.MultiLabel;
+                }
+                break;
+            default:
+                return ScanVolume0PerVoxel(label); // RGB shouldn't reach here, but be safe
+        }
+        return Vol0LabelShape.Binary;
+    }
+
+    // Correct-for-any-layout fallback (MIF custom strides): walks every voxel of
+    // volume 0 through VoxelElementIndex. Slower, but only reached for the rare
+    // strided-format binary candidate.
+    private Vol0LabelShape ScanVolume0PerVoxel(int label)
+    {
+        for (var z = 0; z < Depth; z++)
+            for (var y = 0; y < Height; y++)
+                for (var x = 0; x < Width; x++)
+                {
+                    var v = Voxel(x, y, z, 0);
+                    if (!MiqCompat.IsFinite(v)) continue;
+                    var rounded = MiqCompat.RoundToInt(v);
+                    if (Math.Abs(v - rounded) > 1e-3f) return Vol0LabelShape.Intensity;
+                    if (rounded != 0 && rounded != label) return Vol0LabelShape.MultiLabel;
+                }
+        return Vol0LabelShape.Binary;
+    }
+
+    private static bool IsLabelCandidateDatatype(MiqDatatype dt) => dt switch
+    {
+        // Integer datatypes are the obvious carriers. Float datatypes are included
+        // because label maps are frequently re-saved as float by downstream tools
+        // (resampling, arithmetic on the labels) while still holding integral
+        // values; the per-value integrality check in BuildSegmentationLut is what
+        // actually gates them, so a genuine float intensity image (continuous
+        // values, or > MaxLabels distinct) is still rejected. Rgb24/Rgba32 take the
+        // RGB path, not labels.
+        MiqDatatype.Int8 or MiqDatatype.Uint8 or MiqDatatype.Int16 or MiqDatatype.Uint16
+            or MiqDatatype.Int32 or MiqDatatype.Uint32
+            or MiqDatatype.Float32 or MiqDatatype.Float64 => true,
+        _ => false,
+    };
 
     private PreparedSlice PrepareSlice(
         SlicePlane plane, int? sliceIndex = null, int timepoint = 0)
