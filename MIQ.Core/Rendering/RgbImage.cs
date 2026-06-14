@@ -23,13 +23,15 @@ public sealed class RgbImage(int width, int height, byte[] pixels)
         if (target is not var (tw, th) || (tw == Width && th == Height)) return this;
 
         var outp = new byte[tw * th * Channels];
+        var srcCol = new int[tw];
+        for (var nx = 0; nx < tw; nx++)
+            srcCol[nx] = Math.Min(Width - 1, (int)((float)nx * Width / tw));
         for (var ny = 0; ny < th; ny++)
         {
             var syIdx = Math.Min(Height - 1, (int)((float)ny * Height / th));
             for (var nx = 0; nx < tw; nx++)
             {
-                var sxIdx = Math.Min(Width - 1, (int)((float)nx * Width / tw));
-                var src = (syIdx * Width + sxIdx) * Channels;
+                var src = (syIdx * Width + srcCol[nx]) * Channels;
                 var dst = (ny * tw + nx) * Channels;
                 outp[dst] = Pixels[src];
                 outp[dst + 1] = Pixels[src + 1];

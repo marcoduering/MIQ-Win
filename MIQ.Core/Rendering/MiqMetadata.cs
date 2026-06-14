@@ -63,7 +63,8 @@ public sealed class MiqMetadata
         if (Math.Abs(slope - 1) <= eps && Math.Abs(intercept) <= eps) return null;
 
         var sign = intercept < 0 ? "-" : "+";
+        // Six significant digits, matching the macOS readout (and the live Value row).
         return string.Format(CultureInfo.InvariantCulture,
-            "x {0:0.000} {1} {2:0.000}", slope, sign, Math.Abs(intercept));
+            "x {0:G6} {1} {2:G6}", slope, sign, Math.Abs(intercept));
     }
 }

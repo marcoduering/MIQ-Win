@@ -2,11 +2,12 @@ namespace MIQ.Rendering;
 
 /// <summary>
 /// Maps integer segmentation labels to display RGB. Two colour schemes:
-/// a deterministic hash-based <em>random</em> palette (categorical, distinct
-/// per label, stable across every plane/slice/timepoint without a pre-scan), and
-/// a curated <em>FreeSurfer</em> palette — the canonical colours for the common
+/// a rank-based <em>random</em> palette (labels sorted, hues evenly spaced at
+/// 360/n° apart with a coprime stride so value-adjacent labels are hue-distant;
+/// unknown labels fall back to the per-label hash), and a curated
+/// <em>FreeSurfer</em> palette — the canonical colours for the common
 /// <c>aseg</c> + <c>aparc</c> (Desikan-Killiany) structures, with any label not
-/// in the table falling back to the random palette. Label 0 is background (black,
+/// in the table falling back to the per-label hash. Label 0 is background (black,
 /// the default canvas). There is no macOS counterpart; this is Windows-only.
 /// </summary>
 public sealed class SegmentationLut
@@ -24,6 +25,8 @@ public sealed class SegmentationLut
 
     private readonly bool _useFreeSurfer;
     private readonly bool _monochromeWhite;
+    // Null for FreeSurfer / monochromeWhite instances; populated for Random instances.
+    private readonly Dictionary<int, (byte r, byte g, byte b)>? _rankedPalette;
 
     /// <param name="useFreeSurfer">Use the canonical FreeSurfer palette (else random).</param>
     /// <param name="monochromeWhite">Render every non-zero label white — used for a
@@ -34,6 +37,24 @@ public sealed class SegmentationLut
         _monochromeWhite = monochromeWhite;
     }
 
+    private SegmentationLut(Dictionary<int, (byte r, byte g, byte b)> rankedPalette)
+    {
+        _useFreeSurfer = false;
+        _monochromeWhite = false;
+        _rankedPalette = rankedPalette;
+    }
+
+    /// Build a rank-based random palette: labels are sorted, hues spread evenly
+    /// at 360/n° intervals, with a coprime stride so value-adjacent labels map
+    /// to hue-distant slots. Colors are a pure function of the label set —
+    /// deterministic per file, but a label's color depends on its rank among
+    /// present labels, not its raw value.
+    public static SegmentationLut Random(ISet<int> labels)
+        => new SegmentationLut(BuildRankedPalette(labels));
+
+    public bool IsFreeSurfer => _useFreeSurfer;
+    public bool IsMonochromeWhite => _monochromeWhite;
+
     /// Writes the 3 RGB bytes for <paramref name="label"/> into
     /// <paramref name="dst"/> at <paramref name="offset"/>.
     public void Write(int label, byte[] dst, int offset)
@@ -42,6 +63,7 @@ public sealed class SegmentationLut
 
         var c = _monochromeWhite ? ((byte)255, (byte)255, (byte)255)
             : _useFreeSurfer && FreeSurfer.TryGetValue(label, out var fs) ? fs
+            : _rankedPalette is { } rp && rp.TryGetValue(label, out var rc) ? rc
             : RandomColor(label);
         dst[offset] = c.Item1;
         dst[offset + 1] = c.Item2;
@@ -88,6 +110,39 @@ public sealed class SegmentationLut
         }
         return nonZero >= 3 && known * 2 >= nonZero && hasSignature;
     }
+
+    // Rank-based categorical palette: present labels sorted, hues spread evenly
+    // at 360/n° intervals. A coprime stride (near the golden ratio of n) maps
+    // sorted index → hue slot so value-adjacent labels are hue-distant while
+    // remaining a bijection (no collisions). Two-tier lightness alternation adds
+    // contrast once n is large enough that hue alone crowds. Pure function of
+    // the label set — deterministic per file, unknown labels fall back to RandomColor.
+    private static Dictionary<int, (byte r, byte g, byte b)> BuildRankedPalette(ISet<int> labels)
+    {
+        var sorted = labels.Where(l => l != 0).OrderBy(l => l).ToArray();
+        int n = sorted.Length;
+        var palette = new Dictionary<int, (byte r, byte g, byte b)>(n);
+        if (n == 0) return palette;
+        int stride = CoprimeStride(n);
+        for (int i = 0; i < n; i++)
+        {
+            int slot = (int)(((long)i * stride) % n);
+            float hue = (float)slot / n;
+            float val = (i & 1) == 0 ? 0.97f : 0.78f;
+            palette[sorted[i]] = HsvToRgb(hue, 0.85f, val);
+        }
+        return palette;
+    }
+
+    private static int CoprimeStride(int n)
+    {
+        if (n <= 2) return 1;
+        int s = Math.Max(1, MiqCompat.RoundToInt(n * 0.6180339887f));
+        while (s > 1 && Gcd(s, n) != 1) s--;
+        return s;
+    }
+
+    private static int Gcd(int a, int b) { while (b != 0) (a, b) = (b, a % b); return a; }
 
     // Deterministic per-label colour: hash the label to a hue (and small
     // saturation/value jitter) so adjacent labels separate visually, the same

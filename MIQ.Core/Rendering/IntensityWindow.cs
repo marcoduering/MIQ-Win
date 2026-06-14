@@ -21,18 +21,36 @@ public static class IntensityWindow
 
         // Prefer a non-zero subset if substantial; the /20 ratio guards against
         // rejecting legitimate dim regions when most voxels are background.
-        var nonZero = finite.Where(v => Math.Abs(v) > 1e-6f).ToList();
+        var nonZero = new List<float>(finite.Count);
+        foreach (var v in finite)
+            if (Math.Abs(v) > 1e-6f) nonZero.Add(v);
         var source = nonZero.Count >= Math.Max(64, finite.Count / 20) ? nonZero : finite;
-        var sorted = source.ToArray();
-        Array.Sort(sorted);
+        source.Sort();
 
-        var lower = Percentile(sorted, (float)lowerPercentile / 100f);
-        var upper = Percentile(sorted, (float)upperPercentile / 100f);
+        var lower = Percentile(source, (float)lowerPercentile / 100f);
+        var upper = Percentile(source, (float)upperPercentile / 100f);
         var minV = Min(finite, lower);
         var maxV = Max(finite, upper);
         var windowLow = lower < upper ? lower : minV;
         var windowHigh = lower < upper ? upper : maxV;
         return new Bounds(windowLow, windowHigh);
+    }
+
+    /// Applies precomputed bounds, producing 8-bit grayscale. Specialised overload
+    /// for float[] to avoid per-element interface dispatch on the hot path.
+    public static byte[] Apply(float[] values, Bounds bounds)
+    {
+        var range = Math.Max(bounds.High - bounds.Low, 1e-6f);
+        var outp = new byte[values.Length];
+        for (var i = 0; i < values.Length; i++)
+        {
+            var value = values[i];
+            if (!MiqCompat.IsFinite(value)) { outp[i] = 0; continue; }
+            var clipped = Math.Max(bounds.Low, Math.Min(bounds.High, value));
+            var unit = Math.Max(0f, Math.Min(1f, (clipped - bounds.Low) / range));
+            outp[i] = (byte)MiqCompat.RoundToInt(unit * 255f);
+        }
+        return outp;
     }
 
     /// Applies precomputed bounds, producing 8-bit grayscale.
@@ -65,13 +83,13 @@ public static class IntensityWindow
         return MiqCompat.IsFinite(m) ? m : fallback;
     }
 
-    private static float Percentile(float[] sorted, float p)
+    private static float Percentile(List<float> sorted, float p)
     {
-        if (sorted.Length == 0) return 0f;
-        if (sorted.Length == 1) return sorted[0];
+        if (sorted.Count == 0) return 0f;
+        if (sorted.Count == 1) return sorted[0];
 
         var clamped = Math.Max(0f, Math.Min(1f, p));
-        var position = clamped * (sorted.Length - 1);
+        var position = clamped * (sorted.Count - 1);
         var lowerIndex = (int)Math.Floor((double)position);
         var upperIndex = (int)Math.Ceiling((double)position);
         if (lowerIndex == upperIndex) return sorted[lowerIndex];

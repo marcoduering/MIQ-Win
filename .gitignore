@@ -32,6 +32,11 @@ artifacts/
 .claude/
 # Local-only contributor guidance (contains machine paths / internal notes)
 CLAUDE.md
+# Perf harness corpus + outputs (machine-specific real-file paths; see testcases.txt.example)
+scripts/perf/testcases.txt
+scripts/perf/baseline.json
+scripts/perf/results.json
+scripts/perf/golden.json
 
 # Editor/tooling caches
 *.lscache

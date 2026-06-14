@@ -17,14 +17,14 @@ public sealed class GrayscaleImage(int width, int height, byte[] pixels)
         if (target is not var (tw, th) || (tw == Width && th == Height)) return this;
 
         var outp = new byte[tw * th];
+        var srcCol = new int[tw];
+        for (var nx = 0; nx < tw; nx++)
+            srcCol[nx] = Math.Min(Width - 1, (int)((float)nx * Width / tw));
         for (var ny = 0; ny < th; ny++)
         {
             var syIdx = Math.Min(Height - 1, (int)((float)ny * Height / th));
             for (var nx = 0; nx < tw; nx++)
-            {
-                var sxIdx = Math.Min(Width - 1, (int)((float)nx * Width / tw));
-                outp[ny * tw + nx] = Pixels[syIdx * Width + sxIdx];
-            }
+                outp[ny * tw + nx] = Pixels[syIdx * Width + srcCol[nx]];
         }
         return new GrayscaleImage(tw, th, outp);
     }

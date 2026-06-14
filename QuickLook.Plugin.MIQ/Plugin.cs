@@ -97,19 +97,12 @@ public sealed class Plugin : IViewer
 
                 var fmt = image.Header.FormatLabel ?? kind?.DisplayName() ?? "Unknown";
                 var volume = new MiqVolume(image, options.Orientation);
-                // Segmentation colouring (opt-in) replaces intensity windowing for
-                // detected integer label volumes; the window is then unused.
-                var lut = volume.BuildSegmentationLut(options);
-                var window = lut is null ? volume.SharedWindow(options) : null;
-                var initial = new Dictionary<SlicePlane, CenterSlice>
-                {
-                    [SlicePlane.Coronal] = volume.ExtractSlice(
-                        SlicePlane.Coronal, volume.CenterIndex(SlicePlane.Coronal), window, lut),
-                    [SlicePlane.Sagittal] = volume.ExtractSlice(
-                        SlicePlane.Sagittal, volume.CenterIndex(SlicePlane.Sagittal), window, lut),
-                    [SlicePlane.Axial] = volume.ExtractSlice(
-                        SlicePlane.Axial, volume.CenterIndex(SlicePlane.Axial), window, lut),
-                };
+                // One decode of the three center slices yields the segmentation LUT
+                // (opt-in; replaces intensity windowing for detected label volumes),
+                // the shared window (unused when a LUT is present), and the initial
+                // slices — instead of re-decoding the same slices in each of the
+                // former BuildSegmentationLut + SharedWindow + ExtractSlice×3 calls.
+                var (lut, window, initial) = volume.CenterInteractiveState(options);
                 var orientation = image.Header.OrientationFrame?.Label;
                 var metadata = settings.SelectMetadata(
                     new MiqMetadata(image.Header, fmt, orientation).AsDisplayLines());

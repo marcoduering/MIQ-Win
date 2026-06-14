@@ -1,7 +1,9 @@
+using System.Globalization;
 using System.Threading;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using MIQ;
 using MIQ.Parsing;
 using MIQ.Rendering;
@@ -69,8 +71,17 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
     private readonly double _winRefSpan; // drag sensitivity reference
     private int _winRev;
 
-    // Per-plane cache: (slice index, volume index, window revision) → slice.
-    private readonly Dictionary<SlicePlane, (int index, int vol, int rev, CenterSlice slice)> _cache = new();
+    // Per-plane cache: (slice index, volume index, window revision) → slice + frozen bitmap.
+    // The BitmapSource is built once on cache miss and reused on every render where the
+    // slice hasn't changed, avoiding buffer re-copy on crosshair nav and window/level drag.
+    private readonly Dictionary<SlicePlane, (int index, int vol, int rev, CenterSlice slice, BitmapSource bmp)> _cache = new();
+
+    // Per-plane DECODE cache: (slice index, volume index) → decoded slice, BEFORE
+    // windowing. A window/level drag bumps _winRev (invalidating _cache) but does not
+    // change the decode, so this lets the drag re-window the same gathered voxels
+    // without re-reading Storage. Keyed without rev; invalidated on index/vol change
+    // (overwritten per plane) and cleared on ExpandVolume.
+    private readonly Dictionary<SlicePlane, (int index, int vol, MiqVolume.PreparedSlice prep)> _decode = new();
 
     private bool _navDrag;   // left-drag: focus navigation
     private bool _wlDrag;    // right-drag: window/level
@@ -120,7 +131,10 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
 
         _focus = [_vol.Dim(0) / 2, _vol.Dim(1) / 2, _vol.Dim(2) / 2];
         foreach (var (plane, _, _) in Layout)
-            _cache[plane] = (_vol.CenterIndex(plane), 0, 0, initial[plane]);
+        {
+            var s = initial[plane];
+            _cache[plane] = (_vol.CenterIndex(plane), 0, 0, s, WpfPreviewRenderer.ToBitmap(s.Image));
+        }
 
         Focusable = true;
         FocusVisualStyle = null;
@@ -155,7 +169,8 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         _vol = vol;
         _lut = lut;
         _isExpanded = true;
-        _cache.Clear(); // old slices came from partial storage — discard
+        _cache.Clear();   // old slices came from partial storage — discard
+        _decode.Clear();  // decoded gathers reference the old (partial) storage too
         // Volume 0's window is valid for both partial and full storage (same
         // voxels); keep it. Any other entries would only exist if scrubbing
         // happened during load, which is blocked, so the cache is just [0].
@@ -180,10 +195,23 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         if (_cache.TryGetValue(plane, out var c) &&
             c.index == want && c.vol == _volumeIndex && c.rev == _winRev)
             return c.slice;
-        var slice = _vol.ExtractSlice(plane, want, CurrentWindow(), _lut, timepoint: _volumeIndex);
-        _cache[plane] = (want, _volumeIndex, _winRev, slice);
+        // Reuse the decoded slice when only the window changed (same index + volume);
+        // otherwise decode once and cache it. Finalize applies the current window.
+        MiqVolume.PreparedSlice prep;
+        if (_decode.TryGetValue(plane, out var d) && d.index == want && d.vol == _volumeIndex)
+            prep = d.prep;
+        else
+        {
+            prep = _vol.PrepareInteractive(plane, want, _volumeIndex);
+            _decode[plane] = (want, _volumeIndex, prep);
+        }
+        var slice = _vol.FinalizeInteractive(prep, CurrentWindow(), _lut);
+        _cache[plane] = (want, _volumeIndex, _winRev, slice, WpfPreviewRenderer.ToBitmap(slice.Image));
         return slice;
     }
+
+    // Always called after Slice(plane) within the same render, so the cache entry is current.
+    private BitmapSource SliceBitmap(SlicePlane plane) => _cache[plane].bmp;
 
     private readonly struct Frame(Rect coronal, Rect sagittal, Rect axial, Rect meta)
     {
@@ -231,7 +259,7 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         foreach (var (plane, ax, ay) in Layout)
         {
             var slice = Slice(plane);
-            var dst = WpfPreviewRenderer.DrawSlice(dc, slice, frame.Quad(plane), ax, ay, _settings);
+            var dst = WpfPreviewRenderer.DrawSlice(dc, slice, SliceBitmap(plane), frame.Quad(plane), ax, ay, _settings);
             if (dst.IsEmpty) continue;
             if (_interacted) DrawCrosshair(dc, plane, dst);
         }
@@ -246,12 +274,37 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
             _onExpandRequested != null ? WpfPreviewRenderer.ScrubMode.Loadable :
             WpfPreviewRenderer.ScrubMode.Loading;
         var (scrubHit, tx0, tx1) = WpfPreviewRenderer.DrawMetadata(
-            dc, _metadata, metaRect, _settings,
+            dc, MetadataWithValue(), metaRect, _settings,
             scrubVol: scrubVol, scrubTotal: _vol.Volumes, scrubMode: mode);
         _scrubberRect = scrubHit;
         _scrubTrackX0 = tx0;
         _scrubTrackX1 = tx1;
     }
+
+    // Metadata rows for this frame, optionally with a live "Voxel value" row
+    // appended. The value is interaction-bound: shown only once the crosshair is
+    // visible (so it tracks a real focus, not the default centre), never for RGB
+    // data (no scalar value), and only when enabled. It rides the normal metadata
+    // path — no special drawing — so it inherits the panel styling and clipping.
+    // The whole panel already redraws every interaction frame, so the value simply
+    // reflects the current _focus / _volumeIndex with no separate overlay. Its
+    // position is fixed (last row), so it always sits at the end of the list.
+    private IReadOnlyList<MetadataEntry> MetadataWithValue()
+    {
+        if (!_settings.ShowVoxelValue || !_interacted || _vol.IsRgb)
+            return _metadata;
+
+        var value = FormatVoxelValue(_vol.VoxelValue(_focus[0], _focus[1], _focus[2], _volumeIndex));
+        var list = new List<MetadataEntry>(_metadata) { new("Voxel value", value) };
+        return list;
+    }
+
+    // Six significant digits, matching the macOS readout (and the Scaling row);
+    // integral values render with no decimal point. Non-finite → placeholder.
+    private static string FormatVoxelValue(float v) =>
+        float.IsNaN(v) || float.IsInfinity(v)
+            ? "—"
+            : v.ToString("G6", CultureInfo.InvariantCulture);
 
     private void DrawCrosshair(DrawingContext dc, SlicePlane plane, Rect dst)
     {

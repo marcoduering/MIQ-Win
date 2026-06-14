@@ -40,8 +40,6 @@ if (-not $Dotnet) {
 $proj    = Join-Path $root 'QuickLook.Plugin.MIQ\QuickLook.Plugin.MIQ.csproj'
 $binDir  = Join-Path $root "QuickLook.Plugin.MIQ\bin\$Configuration"
 $distDir = Join-Path $root 'dist'
-$zipPath = Join-Path $distDir 'QuickLook.Plugin.MIQ.zip'
-$pkgPath = Join-Path $distDir 'QuickLook.Plugin.MIQ.qlplugin'
 
 Write-Host "Building $Configuration with $Dotnet ..." -ForegroundColor Cyan
 & $Dotnet build $proj -c $Configuration -v minimal
@@ -61,6 +59,14 @@ if ($Version) {
     $meta.Save($metaPath)
     Write-Host "Stamped version $v into the metadata config." -ForegroundColor Cyan
 }
+
+# Resolve the final version from the (possibly stamped) config so the filename
+# always carries it: QuickLook.Plugin.MIQ.<version>.qlplugin
+[xml]$finalMeta = Get-Content $metaPath
+$pkgVersion = $finalMeta.Metadata.Version
+if (-not $pkgVersion) { throw "No <Version> found in $metaPath." }
+$zipPath = Join-Path $distDir 'QuickLook.Plugin.MIQ.zip'
+$pkgPath = Join-Path $distDir "QuickLook.Plugin.MIQ.$pkgVersion.qlplugin"
 
 # Runtime files only: drop debug symbols and the host-provided QuickLook.Common.
 $files = Get-ChildItem $binDir -File |

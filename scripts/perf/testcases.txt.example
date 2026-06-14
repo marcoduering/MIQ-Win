@@ -1,0 +1,19 @@
+# MIQ-Win perf corpus — copy this file to testcases.txt and fill in real paths.
+#
+# One absolute path per line. Blank lines and lines starting with # are ignored.
+# testcases.txt is gitignored (paths are machine-specific); this example is committed.
+#
+# For good coverage include:
+#   - A 3-D .nii or .nii.gz (exercises the non-partial path)
+#   - A multi-volume 4-D .nii.gz (exercises vol-0-first partial load + libdeflate)
+#   - A large uncompressed .nii > 150 MB (exercises ParseNiftiFirstVolume latency opt)
+#   - An .mgh or .mgz (FreeSurfer anatomy)
+#   - An integer segmentation .nii (exercises BuildSegmentationLut + FreeSurfer LUT)
+#   - A binary mask .nii (exercises ScanVolume0)
+
+# C:\data\anatomy_3d.nii.gz
+# C:\data\bold_4d.nii.gz
+# C:\data\anatomy_large.nii
+# C:\data\T1.mgz
+# C:\data\aparc+aseg.nii.gz
+# C:\data\mask.nii

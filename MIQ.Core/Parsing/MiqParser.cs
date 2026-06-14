@@ -26,6 +26,23 @@ public static class MiqParser
     /// Non-const + internal so it can be lowered to exercise the path on small files.
     internal static long PartialLoadThreshold = 150L * 1024 * 1024;
 
+    /// Minimum volume count for the .nii.gz vol-0-first partial load to be worth it.
+    /// The partial path decompresses only volume 0, but via the managed GZipStream
+    /// (libdeflate can't stop mid-member), which on the shipping net462 plugin is
+    /// 15–50× slower than libdeflate. Decompressing 1/N of the data at that penalty
+    /// only beats a single libdeflate pass over the whole file once N exceeds ~15–50,
+    /// so for a small series (multi-echo GRE/QSM, phase/magnitude pairs — up to a dozen
+    /// volumes) a full parse is faster on the real plugin AND avoids paying twice
+    /// (volume 0 is managed-gunzip'd now, then the WHOLE file — volume 0 again — is
+    /// libdeflate-decompressed on the first scrub) while making the scrubber live
+    /// immediately. Genuinely multi-volume series (DWI/fMRI, dozens–hundreds of volumes)
+    /// stay on the partial path, where the fractional decompress/read dominates the
+    /// managed-gzip penalty and the slow/network-storage latency win it exists for is real.
+    /// NB the net8 MIQ.Perf harness uses .NET 8's fast managed gzip, so it *understates*
+    /// the partial-path cost and will read this fall-through as a "regression"; the win is
+    /// on the net462 plugin. Non-const + internal so tests can vary it.
+    internal static int PartialGzipMinVolumes = 12;
+
     /// <summary>
     /// Optional faster gzip decompressor. Given the file path, returns the
     /// fully-decompressed bytes. The QuickLook plugin sets this to a native
@@ -119,6 +136,14 @@ public static class MiqParser
 
         if (budget >= (long)isize || budget > int.MaxValue)
             return Parse(filePath); // volume 0 is the whole file
+
+        // Too few volumes for the partial dance to pay off: a full libdeflate parse
+        // is cheaper than slow-managed-gunzipping volume 0 (and re-decompressing the
+        // whole file on first scrub), and leaves the scrubber live immediately. Only
+        // when the full data fits a byte[] — an oversized file (isize > MaxArrayBytes)
+        // can't be parsed whole, so it must stay on the permanent blocked vol-0 view.
+        if (header.Volumes < PartialGzipMinVolumes && isize <= (ulong)MaxArrayBytes)
+            return Parse(filePath);
 
         byte[] partial;
         try

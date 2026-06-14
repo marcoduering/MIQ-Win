@@ -51,16 +51,18 @@ internal static class WpfPreviewRenderer
     }
 
     internal static Rect DrawSlice(
-        DrawingContext dc, CenterSlice slice, Rect quad, double ax, double ay, MiqSettings s)
+        DrawingContext dc, CenterSlice slice, BitmapSource bmp, Rect quad, double ax, double ay, MiqSettings s)
     {
         if (quad.Width <= 0 || quad.Height <= 0) return Rect.Empty;
-
-        var src = ToBitmap(slice.Image);
-        var dst = SliceDst(quad, src.PixelWidth, src.PixelHeight, ax, ay);
-        dc.DrawImage(src, dst);
+        var dst = SliceDst(quad, bmp.PixelWidth, bmp.PixelHeight, ax, ay);
+        dc.DrawImage(bmp, dst);
         DrawAxisLabels(dc, slice.Labels, dst, s);
         return dst;
     }
+
+    internal static Rect DrawSlice(
+        DrawingContext dc, CenterSlice slice, Rect quad, double ax, double ay, MiqSettings s)
+        => DrawSlice(dc, slice, ToBitmap(slice.Image), quad, ax, ay, s);
 
     private static void DrawAxisLabels(
         DrawingContext dc, SliceOrientationLabels labels, Rect r, MiqSettings s)
@@ -221,7 +223,7 @@ internal static class WpfPreviewRenderer
         new(s, CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
             face ?? Bold, size, brush, 1.0);
 
-    private static BitmapSource ToBitmap(SliceImage img)
+    internal static BitmapSource ToBitmap(SliceImage img)
     {
         BitmapSource bmp = img.Rgb is { } rgb
             ? BitmapSource.Create(

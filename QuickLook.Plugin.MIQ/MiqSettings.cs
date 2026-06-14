@@ -55,6 +55,11 @@ internal sealed class MiqSettings
     // ShowDisclaimer = false.
     public bool ShowDisclaimer { get; private set; } = true;
 
+    // Live "Voxel value" metadata row showing the value under the crosshair, at
+    // the end of the panel. Shown only while the user is interacting (crosshair
+    // visible) and never for RGB images. Default on; hide via ShowVoxelValue = false.
+    public bool ShowVoxelValue { get; private set; } = true;
+
     // View orientation: Stored renders axes as stored; Neurological/Radiological
     // reorient + relabel each plane (they differ only by the coronal/axial R/L
     // flip). Files without an OrientationFrame always fall back to Stored.
@@ -211,6 +216,7 @@ internal sealed class MiqSettings
         MetadataLabelColor = Col(m, "MetadataLabelColor", MetadataLabelColor);
         MetadataValueColor = Col(m, "MetadataValueColor", MetadataValueColor);
         ShowDisclaimer = Flag(m, "ShowDisclaimer", ShowDisclaimer);
+        ShowVoxelValue = Flag(m, "ShowVoxelValue", ShowVoxelValue);
         Orientation = OrientationOf(m, "Orientation", Orientation);
         Segmentation = SegmentationOf(m, "SegmentationColors", Segmentation);
         IntensityPercentileLow = Num(m, "IntensityPercentileLow", IntensityPercentileLow);
@@ -304,15 +310,29 @@ internal sealed class MiqSettings
         ";   random  as auto, but always random colours (ignore FreeSurfer).",
         $"SegmentationColors      = {SegmentationName(Segmentation)}");
 
+    // The ShowVoxelValue block (comment + key), shared by DefaultText and the
+    // migration below so they can never drift.
+    private string VoxelValueSettingText() => string.Join("\r\n",
+        "; Live \"Voxel value\" row at the end of the metadata panel showing the",
+        "; value under the crosshair. Appears only while you interact (crosshair",
+        "; visible) and updates as you move it; never shown for RGB images.",
+        $"ShowVoxelValue          = {(ShowVoxelValue ? "true" : "false")}");
+
     // Append any setting added after the user's ini was first written, so an
     // upgraded user sees the new key documented in their own file. Runs on every
-    // load but only does a dictionary lookup; it writes (once) solely when the key
-    // is genuinely absent, after which the key is present and this no-ops.
+    // load but only does dictionary lookups; each block writes (once) solely when
+    // its key is genuinely absent, after which the key is present and it no-ops.
     private void MigrateMissingKeys(string path, IReadOnlyDictionary<string, string> existing)
     {
-        if (existing.ContainsKey("SegmentationColors")) return; // added in 1.1
-        var block = "\r\n; --- added by a newer MIQ version ---\r\n"
-                    + SegmentationSettingText() + "\r\n";
+        if (!existing.ContainsKey("SegmentationColors")) // added in 1.1
+            AppendMigrationBlock(path, SegmentationSettingText());
+        if (!existing.ContainsKey("ShowVoxelValue"))     // added in 1.2
+            AppendMigrationBlock(path, VoxelValueSettingText());
+    }
+
+    private static void AppendMigrationBlock(string path, string body)
+    {
+        var block = "\r\n; --- added by a newer MIQ version ---\r\n" + body + "\r\n";
         try { File.AppendAllText(path, block); } catch { /* read-only dir: harmless */ }
     }
 
@@ -397,6 +417,8 @@ internal sealed class MiqSettings
             "; Available: Format, Dimensions, Spacing, Orientation, Datatype,",
             ";            Volumes, Scaling.",
             $"MetadataFields          = {string.Join(", ", MetadataFields)}",
+            "",
+            VoxelValueSettingText(),
             "",
             "; Footer disclaimer — MIQ-Win is a research/preview tool, not a medical",
             "; device and not for diagnostic use. Set false to hide the line at the",
