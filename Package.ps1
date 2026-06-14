@@ -60,13 +60,15 @@ if ($Version) {
     Write-Host "Stamped version $v into the metadata config." -ForegroundColor Cyan
 }
 
-# Resolve the final version from the (possibly stamped) config so the filename
-# always carries it: QuickLook.Plugin.MIQ.<version>.qlplugin
+# Validate a version is present (QuickLook rejects an empty <Version> at install),
+# but keep the package FILENAME version-less. QuickLook installs to a folder named
+# after the file (…\QuickLook.Plugin\<filename-without-extension>), so the name
+# MUST be stable across releases — otherwise each version installs into a new
+# folder instead of upgrading the existing one in place, breaking distribution.
 [xml]$finalMeta = Get-Content $metaPath
-$pkgVersion = $finalMeta.Metadata.Version
-if (-not $pkgVersion) { throw "No <Version> found in $metaPath." }
+if (-not $finalMeta.Metadata.Version) { throw "No <Version> found in $metaPath." }
 $zipPath = Join-Path $distDir 'QuickLook.Plugin.MIQ.zip'
-$pkgPath = Join-Path $distDir "QuickLook.Plugin.MIQ.$pkgVersion.qlplugin"
+$pkgPath = Join-Path $distDir 'QuickLook.Plugin.MIQ.qlplugin'
 
 # Runtime files only: drop debug symbols and the host-provided QuickLook.Common.
 $files = Get-ChildItem $binDir -File |
