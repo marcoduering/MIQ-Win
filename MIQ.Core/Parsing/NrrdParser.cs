@@ -162,6 +162,12 @@ public static class NrrdParser
             throw new MiqException("NRRD header is missing required field 'type'.");
         var datatype = ParseDatatype(typeStr);
 
+        // Runs before the payload is gunzipped, so an implausible header is
+        // rejected without decompressing anything. The slice-plane guard can't run
+        // here — which axes are spatial isn't resolved until AxisLayout — so it
+        // lives in BuildMiqHeader, which both Parse and ParseHeader route through.
+        MiqParser.ValidateDimensionExtent(sizes, datatype.BytesPerVoxel());
+
         var endianStr = (fields.TryGetValue("endian", out var en) ? en : "little").ToLowerInvariant();
         var littleEndian = endianStr != "big";
 
@@ -207,6 +213,8 @@ public static class NrrdParser
         var sy = nrrd.Sizes[spatialAxes[1]];
         var sz = nrrd.Sizes[spatialAxes[2]];
         var nVols = volumeAxis.HasValue ? nrrd.Sizes[volumeAxis.Value] : 1;
+
+        MiqParser.ValidateSlicePlaneExtent(sx, sy, sz);
 
         // Raw element strides (each axis varies faster than the next).
         var rawStrides = new int[nrrd.Sizes.Length];
@@ -257,11 +265,14 @@ public static class NrrdParser
 
     private static MiqImage BuildImage(NrrdParsedHeader nrrd, byte[] storage, int payloadOffset)
     {
+        // Multiplies over every declared axis (unchanged semantics).
+        // ValidateDimensionExtent bounds the product; comparing against
+        // storage.Length - payloadOffset keeps the comparison overflow-free.
         long totalElements = 1;
         foreach (var s in nrrd.Sizes) totalElements *= s;
         var payloadBytes = totalElements * nrrd.Datatype.BytesPerVoxel();
         if (payloadBytes <= 0) throw MiqException.InvalidDimensions();
-        if (storage.Length < payloadOffset + payloadBytes) throw MiqException.TruncatedData();
+        if (storage.Length - (long)payloadOffset < payloadBytes) throw MiqException.TruncatedData();
 
         var descriptor = BuildMiqHeader(nrrd, payloadOffset);
 

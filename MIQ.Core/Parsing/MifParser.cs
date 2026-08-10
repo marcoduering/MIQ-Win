@@ -99,14 +99,24 @@ public static class MifParser
             throw new MiqException("MIF header: missing 'datatype' field.");
         var (datatype, littleEndian) = ParseDatatype(dtStr);
 
+        // dim is validated positive and ≥3 entries above. MRtrix axes 0/1/2 are
+        // the spatial ones, so they are the trio that forms the slice planes.
+        MiqParser.ValidateDimensionExtent(dim, datatype.BytesPerVoxel());
+        MiqParser.ValidateSlicePlaneExtent(dim[0], dim[1], dim[2]);
+
         if (!fields.TryGetValue("file", out var fileStr))
             throw new MiqException("MIF header: missing 'file' field.");
         var payloadOffset = ParseFileSpec(fileStr, headerEndOffset);
 
+        // Multiplies over EVERY declared axis, not just the first four — a 5-D MIF
+        // stores all of them, so narrowing this to W·H·D·T would under-require.
+        // ValidateDimensionExtent bounds the product; comparing against
+        // data.Length - payloadOffset keeps the comparison itself overflow-free
+        // (and still rejects a payloadOffset past the end, which goes negative).
         long totalElements = 1;
         foreach (var d in dim) totalElements *= d;
-        var requiredBytes = payloadOffset + totalElements * datatype.BytesPerVoxel();
-        if (data.Length < requiredBytes)
+        var payloadBytes = totalElements * datatype.BytesPerVoxel();
+        if (data.Length - (long)payloadOffset < payloadBytes)
             throw MiqException.TruncatedData();
 
         var (elementStrides, baseElementIndex) = ComputeStrides(dim, layout);

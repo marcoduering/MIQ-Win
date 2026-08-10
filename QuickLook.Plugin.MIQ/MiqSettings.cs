@@ -66,11 +66,15 @@ internal sealed class MiqSettings
     public MiqOrientation Orientation { get; private set; } = MiqOrientation.Stored;
 
     // Colour integer segmentation/label volumes instead of percentile-windowing
-    // them. Off (default) preserves the legacy grayscale path for every file;
-    // auto detects label volumes and colours them (canonical FreeSurfer palette
-    // when the labels match a FreeSurfer parcellation, else a categorical random
-    // palette); random forces the random palette and never uses FreeSurfer colours.
-    public MiqSegmentationColoring Segmentation { get; private set; } = MiqSegmentationColoring.Off;
+    // them. Auto (default) detects label volumes and colours them (canonical
+    // FreeSurfer palette when the labels match a FreeSurfer parcellation, else a
+    // categorical random palette); random forces the random palette and never
+    // uses FreeSurfer colours; off keeps the legacy grayscale path for every file.
+    //
+    // The default applies to NEW installs only: any existing ini keeps the value
+    // it already carries, and one written before this key existed is migrated to
+    // an explicit "off" — see MigrateMissingKeys.
+    public MiqSegmentationColoring Segmentation { get; private set; } = MiqSegmentationColoring.Auto;
 
     public double IntensityPercentileLow { get; private set; } = 2.0;
     public double IntensityPercentileHigh { get; private set; } = 98.0;
@@ -299,16 +303,18 @@ internal sealed class MiqSettings
     };
 
     // The SegmentationColors block (comments + key), shared by DefaultText and the
-    // one-time migration below so they can never drift.
-    private string SegmentationSettingText() => string.Join("\r\n",
+    // one-time migration below so they can never drift. The written value is a
+    // parameter because the two callers differ: a new file gets the current
+    // default, a migrated one gets the legacy "off" (see MigrateMissingKeys).
+    private static string SegmentationSettingText(MiqSegmentationColoring value) => string.Join("\r\n",
         "; Segmentation colours: off | auto | random",
-        ";   off     percentile-window every file as grayscale (default).",
         ";   auto    detect integer label volumes and colour them, canonical",
         ";           FreeSurfer colours when the labels match a FreeSurfer",
         ";           parcellation (aseg/aparc), otherwise random per-label",
-        ";           colours. Plain intensity images are left grayscale.",
+        ";           colours. Plain intensity images are left grayscale (default).",
         ";   random  as auto, but always random colours (ignore FreeSurfer).",
-        $"SegmentationColors      = {SegmentationName(Segmentation)}");
+        ";   off     percentile-window every file as grayscale.",
+        $"SegmentationColors      = {SegmentationName(value)}");
 
     // The ShowVoxelValue block (comment + key), shared by DefaultText and the
     // migration below so they can never drift.
@@ -325,8 +331,18 @@ internal sealed class MiqSettings
     private void MigrateMissingKeys(string path, IReadOnlyDictionary<string, string> existing)
     {
         if (!existing.ContainsKey("SegmentationColors")) // added in 1.1
-            AppendMigrationBlock(path, SegmentationSettingText());
-        if (!existing.ContainsKey("ShowVoxelValue"))     // added in 1.2
+        {
+            // An ini written before this key existed belongs to an existing
+            // install, which must keep rendering exactly as it did — so pin the
+            // legacy "off" rather than inheriting the current default (auto,
+            // which is for new installs only). Assign the field too: the file we
+            // just wrote is now the truth, and this preview must already match it
+            // or the very first preview after an upgrade would differ from every
+            // one after it.
+            Segmentation = MiqSegmentationColoring.Off;
+            AppendMigrationBlock(path, SegmentationSettingText(Segmentation));
+        }
+        if (!existing.ContainsKey("ShowVoxelValue"))     // added in 1.1
             AppendMigrationBlock(path, VoxelValueSettingText());
     }
 
@@ -402,7 +418,7 @@ internal sealed class MiqSettings
             "; orientation metadata always fall back to stored.",
             $"Orientation             = {OrientationName(Orientation)}",
             "",
-            SegmentationSettingText(),
+            SegmentationSettingText(Segmentation),
             "",
             "; Intensity window — contrast mapping as percentiles (0-100) of voxel",
             "; values pooled across all slices. Narrow [low, high] for more contrast,",

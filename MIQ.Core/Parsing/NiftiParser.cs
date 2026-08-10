@@ -9,6 +9,9 @@ public static class NiftiParser
     public static MiqImage Parse(byte[] data, string? formatLabel = null)
     {
         var header = ParseHeader(data, formatLabel);
+        // FIXME(harden): no payload-extent check — dims may exceed the data.
+        // Any fix belongs HERE, not in ParseHeader: the vol-0-first partial
+        // loads call that on a 1 KB probe and would silently stop partial-loading.
         if (data.Length < header.VoxOffset)
             throw MiqException.TruncatedData();
         return new MiqImage
@@ -26,12 +29,21 @@ public static class NiftiParser
         var headerSizeLE = MiqBinaryReader.Int32(data, 0, littleEndian: true);
         var headerSizeBE = MiqBinaryReader.Int32(data, 0, littleEndian: false);
 
+        MiqHeader header;
         if (headerSizeLE == 348 || headerSizeBE == 348)
-            return ParseNifti1Header(data, littleEndian: headerSizeLE == 348, formatLabel);
-        if (headerSizeLE == 540 || headerSizeBE == 540)
-            return ParseNifti2Header(data, littleEndian: headerSizeLE == 540, formatLabel);
+            header = ParseNifti1Header(data, littleEndian: headerSizeLE == 348, formatLabel);
+        else if (headerSizeLE == 540 || headerSizeBE == 540)
+            header = ParseNifti2Header(data, littleEndian: headerSizeLE == 540, formatLabel);
+        else
+            throw MiqException.InvalidHeaderSize(headerSizeLE);
 
-        throw MiqException.InvalidHeaderSize(headerSizeLE);
+        // Header-only representability guards: safe here (and reached by the
+        // vol-0-first partial loads, which call ParseHeader on a 1 KB probe)
+        // precisely because neither asserts the payload is present.
+        var bpv = header.Datatype.BytesPerVoxel();
+        MiqParser.ValidateDimensionExtent(header.Dimensions, bpv);
+        MiqParser.ValidateSlicePlaneExtent(header.Width, header.Height, header.Depth);
+        return header;
     }
 
     // ── NIfTI-1 (348-byte header) ────────────────────────────────────────────
@@ -46,6 +58,7 @@ public static class NiftiParser
         var datatype = ReadAndValidateDatatype(data, datatypeOffset: 70, bitpixOffset: 72, littleEndian);
 
         var pixdim = MiqBinaryReader.Float32Array(data, 76, count: 8, littleEndian);
+        // FIXME(harden): (int)float diverges — net8 saturates, net462 does not.
         var voxOffset = (int)MiqBinaryReader.Float32(data, 108, littleEndian);
         var sclSlope = MiqBinaryReader.Float32(data, 112, littleEndian);
         var sclInter = MiqBinaryReader.Float32(data, 116, littleEndian);
@@ -92,12 +105,14 @@ public static class NiftiParser
         if (data.Length < 540) throw MiqException.TruncatedData();
 
         var dim = MiqBinaryReader.Int64Array(data, 16, count: 8, littleEndian);
+        // FIXME(harden): unchecked narrowing — a dim past int.MaxValue becomes 1.
         var dimensions = ParseDimensions(Array.ConvertAll(dim, v => (int)v));
 
         var datatype = ReadAndValidateDatatype(data, datatypeOffset: 12, bitpixOffset: 14, littleEndian);
 
         var pixdim = Array.ConvertAll(
             MiqBinaryReader.Float64Array(data, 104, count: 4, littleEndian), v => (float)v);
+        // FIXME(harden): unchecked narrowing of a 64-bit offset.
         var voxOffset = (int)MiqBinaryReader.Int64(data, 168, littleEndian);
         var sclSlope = (float)MiqBinaryReader.Float64(data, 176, littleEndian);
         var sclInter = (float)MiqBinaryReader.Float64(data, 184, littleEndian);

@@ -244,6 +244,63 @@ public static class MiqParser
         catch { return 0; }
     }
 
+    /// Rejects a header whose declared voxel extent (product of every axis ×
+    /// bytes-per-voxel) can't be represented in a long. Parsers derive their
+    /// required-payload size from that product, and C# multiplies unchecked — so
+    /// a wrapped product can slip past a `data.Length &lt; required` check and let a
+    /// tiny file claim an enormous volume. (Swift trapped here instead; the C#
+    /// failure is silent, which is why the guard matters more on this side.)
+    ///
+    /// Purely an arithmetic representability guard — it does NOT assert the
+    /// payload is present, so the bounded NIfTI vol-0-first cold load (whose
+    /// buffer holds only volume 0, and whose header probe is 1 KB) is unaffected.
+    /// Validating in each format's earliest shared header-parse step also protects
+    /// every downstream product, since each is ≤ this total.
+    ///
+    /// Non-positive axes are skipped rather than rejected: every caller has
+    /// already validated positivity, and skipping keeps a stray 0 from turning the
+    /// overflow test's division into a DivideByZeroException.
+    internal static void ValidateDimensionExtent(IReadOnlyList<int> dims, int bytesPerVoxel)
+    {
+        long total = Math.Max(1, bytesPerVoxel);
+        foreach (var d in dims)
+        {
+            if (d <= 0) continue;
+            if (total > long.MaxValue / d) throw MiqException.InvalidDimensions();
+            total *= d;
+        }
+    }
+
+    /// Rejects spatial dimensions whose slice planes would overflow the int
+    /// arithmetic that sizes a slice buffer. Any two of the three spatial axes can
+    /// become a plane's (width, height) — coronal is W×D, sagittal H×D, axial W×H,
+    /// and the reoriented modes only permute which pair — and a plane is allocated
+    /// as `new float[w * h]`, with RGB adding `new byte[w * h * 3]`. Both are int
+    /// multiplies, so an unvalidated pair wraps to a small or negative length.
+    ///
+    /// The bound sits far above anything reachable: it permits planes larger than
+    /// the CLR can allocate as a single array (a float[] tops out near 536 M
+    /// elements), so a header between this bound and reality still fails cleanly
+    /// with OutOfMemoryException rather than wrapping. No real volume is within
+    /// orders of magnitude of it.
+    internal static void ValidateSlicePlaneExtent(int width, int height, int depth)
+    {
+        ValidatePlanePair(width, height);
+        ValidatePlanePair(width, depth);
+        ValidatePlanePair(height, depth);
+    }
+
+    /// int.MaxValue / 3 leaves room for the RGB path's ×3 without wrapping.
+    private const long MaxSlicePlaneElements = int.MaxValue / 3;
+
+    private static void ValidatePlanePair(long a, long b)
+    {
+        // Both operands are non-negative ints widened to long, so a*b (≤ 2^62)
+        // cannot overflow the comparison.
+        if (a > 0 && b > 0 && a * b > MaxSlicePlaneElements)
+            throw MiqException.InvalidDimensions();
+    }
+
     private static byte[] LoadAndDecompress(string filePath, MiqFileKind kind, CancellationToken ct)
     {
         if (!kind.IsCompressed())

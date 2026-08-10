@@ -4,9 +4,16 @@
 
 .DESCRIPTION
     A .qlplugin is a ZIP of the plugin's runtime files. QuickLook installs it to
-    %LOCALAPPDATA%\QuickLook\QuickLook.Plugin\<file-name-without-extension>, so
-    the artifact is named QuickLook.Plugin.MIQ.qlplugin. QuickLook.Common.dll is
-    deliberately excluded — the host provides it at runtime.
+    <data-folder>\QuickLook.Plugin\<file-name-without-extension> — the data
+    folder being the one holding QuickLook.config (tray icon → "Open Data
+    Folder"; its location varies by deployment, e.g. %APPDATA%\pooi.moe\QuickLook
+    for the installer build). So the artifact is named
+    QuickLook.Plugin.MIQ.qlplugin. QuickLook.Common.dll is deliberately
+    excluded — the host provides it at runtime.
+
+    LICENSE and THIRD-PARTY-NOTICES.md are packaged alongside the runtime files:
+    the bundled libdeflate.dll and the BCL backports are MIT, which requires
+    their notices to travel with the redistributed binaries.
 
 .PARAMETER Configuration
     Build configuration (default: Release).
@@ -76,11 +83,25 @@ $files = Get-ChildItem $binDir -File |
 
 if (-not $files) { throw "No build output found in $binDir." }
 
+# License texts must ship with the package. The bundled libdeflate.dll and the
+# NuGet BCL backports (System.Memory, System.ValueTuple, ...) are MIT, which
+# permits redistribution only on the condition that the copyright and permission
+# notices accompany the copy — so a package without these is non-compliant, not
+# merely untidy. Hard-fail rather than silently shipping one. See
+# THIRD-PARTY-NOTICES.md and the "Vendored Binaries" section of CONTRIBUTING.md.
+$legal = @('LICENSE', 'THIRD-PARTY-NOTICES.md') | ForEach-Object {
+    $p = Join-Path $root $_
+    if (-not (Test-Path $p)) { throw "Required license file is missing: $p" }
+    $p
+}
+
+$paths = @($files.FullName) + $legal
+
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 Remove-Item $zipPath, $pkgPath -ErrorAction SilentlyContinue
-Compress-Archive -Path $files.FullName -DestinationPath $zipPath -CompressionLevel Optimal
+Compress-Archive -Path $paths -DestinationPath $zipPath -CompressionLevel Optimal
 Move-Item $zipPath $pkgPath
 
 Write-Host "Packaged:" -ForegroundColor Green
-$files | ForEach-Object { "  $($_.Name)" }
+$paths | ForEach-Object { "  $(Split-Path $_ -Leaf)" }
 Write-Host "-> $pkgPath" -ForegroundColor Green

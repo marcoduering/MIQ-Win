@@ -2,70 +2,85 @@
 
 ## Building
 
-**Requirements:**
-- .NET SDK 8.0 or later (for the reference build and packaging)
-- Windows (WPF and QuickLook require it)
+Requires the .NET 8 SDK and Windows (WPF and QuickLook need it).
 
 ```powershell
-# Release build (Release is the default configuration)
-./Package.ps1
-
-# Release build with a version stamp
-./Package.ps1 -Version 1.2.3
+./Package.ps1                  # Release build → dist/QuickLook.Plugin.MIQ.qlplugin
+./Package.ps1 -Version 1.2.3   # ...with a version stamp
 ```
 
-The `net8.0-windows` `MIQ.Core` project is a reference/testing build only; the actual plugin runs on .NET Framework 4.6.2 (`net462`), whose runtime ships with Windows.
+`MIQ.Core` (`net8.0-windows`) is a reference/testing build only; the shipping plugin
+targets .NET Framework 4.6.2 (`net462`), whose runtime comes with Windows.
+`Package.ps1` builds both.
 
-The script builds both projects and produces `dist/QuickLook.Plugin.MIQ.qlplugin`.
-
-
-**Source linking:** The parser and renderer source files in `MIQ.Core/` are also
-compiled directly into the plugin via `<Compile Include>` in
-`QuickLook.Plugin.MIQ.csproj`. Changes to those files affect both builds.
+**Source linking:** `MIQ.Core/`'s parser and renderer sources are *also* compiled
+into the plugin via `<Compile Include>` in `QuickLook.Plugin.MIQ.csproj` — changes
+there affect both builds.
 
 ---
 
 ## Vendored Binaries
 
-Two pre-built binaries are committed to the repository. When updating them,
-verify the SHA-256 hashes below match, then update this file with the new hash
-and version.
+Two pre-built binaries are committed. When replacing either, verify the SHA-256
+below, then update the hash and version here.
+
+Both are MIT, as are the NuGet BCL backports that ship in the package. Their
+notices live in [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md), which
+`Package.ps1` puts into the `.qlplugin` alongside `LICENSE`. **Adding or updating
+a redistributed binary means updating that file too** — MIT permits redistribution
+only if the notice travels with the copy.
 
 ### `QuickLook.Plugin.MIQ/native/libdeflate.dll`
 
 | Field | Value |
 |---|---|
 | **Source** | https://github.com/ebiggers/libdeflate |
-| **License** | MIT |
+| **License** | MIT (Eric Biggers; Google LLC) |
+| **Version** | 1.19+, locally built, otherwise unidentified — see below |
 | **SHA-256** | `60b414b5932e57f88ebf53cd3010adf8c042391d40006efd588cf463eeb5f29b` |
 
-This is the Windows x64 shared library build of libdeflate, used for fast
-gzip decompression (~15–50× faster than the .NET Framework built-in `GZipStream`
-for single-shot decompression with a known output size). The plugin falls back
-transparently to the managed `GZipStream` path if the DLL cannot be loaded.
+Windows x64 shared library, used for fast gzip decompression (~15–50× faster than
+.NET Framework's `GZipStream` for single-shot decompression with a known output
+size). Falls back transparently to managed `GZipStream` if it can't be loaded.
 
-To build a replacement from source:
+The exact version is **unrecoverable** — investigated 2026-08-10, don't repeat it:
+no version resource or embedded version string; the hash matches no official
+1.19–1.24 release binary (so it was built locally); and the 21 exports are identical
+across 1.19–1.24, giving only a floor of 1.19 (`libdeflate_alloc_compressor_ex` /
+`libdeflate_alloc_decompressor_ex`, added there). **Record the version next time this
+is rebuilt** — without it, checking the binary against an advisory is guesswork.
+
+Rebuild from source, then copy `libdeflate.dll` into `QuickLook.Plugin.MIQ/native/`:
 ```bash
 cmake -B build -DLIBDEFLATE_BUILD_SHARED_LIB=ON -DLIBDEFLATE_BUILD_STATIC_LIB=OFF
 cmake --build build --config Release
 ```
-Copy the resulting `libdeflate.dll` into `QuickLook.Plugin.MIQ/native/`.
 
 ### `lib/QuickLook.Common.dll`
 
 | Field | Value |
 |---|---|
 | **Source** | https://github.com/QL-Win/QuickLook (release v4.5.0) |
-| **License** | GPL-3.0 |
+| **License** | **MIT** — *not* GPL-3.0 |
 | **Version** | 4.5.0.0 |
 | **SHA-256** | `09b68a365d1ca47114be2240e8d90fd1f221edf6a7fe6acf5ebde291cde7ae52` |
 
-This is the host API used to register the plugin with QuickLook (the
-`IViewer` interface, `ContextObject`, theme constants, etc.). It is included
-for building only — QuickLook provides its own copy at runtime, so the DLL is
-excluded from the packaged `.qlplugin`. When a new QuickLook release changes
-the API, replace this file with the corresponding DLL from the QuickLook
-release artifacts and update the hash here.
+The host API (`IViewer`, `ContextObject`, theme constants). Build-time only —
+QuickLook provides its own copy at runtime, so it is excluded from the packaged
+`.qlplugin`. Replace it from the QuickLook release artifacts when the API changes.
+
+**License:** this table said GPL-3.0 until 2026-08-10. That was wrong, and worth
+knowing in case it was copied elsewhere, since it makes an MIT plugin look like a
+copyleft violation. The QuickLook *application* is GPL-3.0, but the
+`QuickLook.Common/` directory carries its own MIT `LICENSE` and is published to
+NuGet as MIT (4.5.0, `net462`, matching this DLL). No GPL code is linked or
+redistributed. Re-verify if a future release changes that `LICENSE`.
+
+**Kept vendored deliberately** (settled 2026-08-10): a `PackageReference` would
+compile equivalently, but vendoring is why builds need no installed QuickLook and
+no restore, and the hash pins the exact bits. The DLL is never redistributed, so a
+swap would solve nothing. Accepted cost — dependency scanners don't see committed
+binaries, so advisories won't surface automatically.
 
 ---
 
@@ -73,18 +88,15 @@ release artifacts and update the hash here.
 
 ### File extension mapping
 
-`.mgh.gz` and `.mgz` are both FreeSurfer compressed MGH volumes — different
-extensions for the same format. Both map to `MiqFileKind.Mgz` (compressed),
-while `.mgh` maps to `MiqFileKind.Mgh` (uncompressed). This is intentional:
-do not "fix" the dual mapping.
+`.mgh.gz` and `.mgz` are the same format (compressed FreeSurfer MGH) and both map
+to `MiqFileKind.Mgz`; `.mgh` maps to `MiqFileKind.Mgh`. Intentional — don't "fix"
+the dual mapping.
 
 ### Orientation: sform vs qform
 
-NIfTI files carry two optional coordinate transforms — sform and qform. The
-parser prefers sform (`SformCode > 0`) and falls back to qform
-(`QformCode > 0`) via `OrientationFrame.FromQuaternion()`. When neither is
-present (both codes == 0) the orientation frame is null and the slice labels
-show as unknown.
+The parser prefers NIfTI's sform (`SformCode > 0`) and falls back to qform
+(`QformCode > 0`) via `OrientationFrame.FromQuaternion()`. With both codes `0` the
+orientation frame is null and slice labels show as unknown.
 
 ### View orientation (stored / neurological / radiological)
 
@@ -92,108 +104,99 @@ The `Orientation` key in `MIQ.settings.ini` (carried on
 `MiqRenderingOptions.Orientation`) selects how axes are presented:
 
 - **stored** (default) — render axes exactly as stored.
-- **neurological** — canonical anatomical view, patient-LEFT on the viewer's
-  left (coronal/axial).
+- **neurological** — canonical anatomical view, patient-LEFT on the viewer's left
+  (coronal/axial).
 - **radiological** — same, but patient-LEFT on the viewer's right.
 
-`MiqVolume.PlanFor(plane)` is the single resolver — it returns a
-`SlicePlan(SliceAxis, HAxis, VAxis, HReversed, VReversed, Labels)` and every
-per-plane path goes through it (`PrepareSlice`, `AxesFor`, `SliceCount`, plus
-the interactive control's crosshair and click-navigation). `SliceConfig.Coordinate`
-honors `HReversed`; the control inverts both flags to map a click back to its
-storage voxel, so the two must stay in sync.
+`MiqVolume.PlanFor(plane)` is the single resolver, returning
+`SlicePlan(SliceAxis, HAxis, VAxis, HReversed, VReversed, Labels)`; every per-plane
+path goes through it (`PrepareSlice`, `AxesFor`, `SliceCount`, and the interactive
+control's crosshair and click-navigation). `SliceConfig.Coordinate` honors
+`HReversed`; the control inverts both flags to map a click back to its storage
+voxel, so the two must stay in sync.
 
 Two rules when touching this code:
 
 1. **Reoriented-mode edge labels are hardcoded** per (plane, mode) in
-   `ReorientedPlan` — do *not* derive them from `OrientationFrame.DisplayLabels`.
-   Those describe the *stored* axes and would lie in a reoriented view (a RAS
+   `ReorientedPlan` — do *not* derive them from `OrientationFrame.DisplayLabels`,
+   which describe the *stored* axes and would lie in a reoriented view (a RAS
    volume's stored sagittal reads `P|A`, the reverse of the canonical `A|P`).
-2. **Sagittal is identical in both reoriented modes** (Anterior on the viewer's
-   left, no in-plane R/L); coronal and axial differ only by the horizontal R/L
-   flip. Files lacking an `OrientationFrame` always fall back to stored.
+2. **Sagittal is identical in both reoriented modes** (Anterior on the left, no
+   in-plane R/L); coronal and axial differ only by the horizontal R/L flip. Files
+   with no `OrientationFrame` always fall back to stored.
 
 ### RGB rendering
 
-`rgb24` / `rgba32` voxels are rendered in colour rather than collapsed to
-grayscale. A finished slice is a `SliceImage` — a union of `GrayscaleImage` or
-`RgbImage` (port of MIQCore's `SliceImage` enum). `RgbImage` holds interleaved
-3-byte RGB (composited via WPF `PixelFormats.Rgb24`). Two rules mirror macOS
-MIQ:
+`rgb24` / `rgba32` voxels render in colour rather than collapsing to grayscale. A
+finished slice is a `SliceImage` — a union of `GrayscaleImage` or `RgbImage` (port
+of MIQCore's `SliceImage` enum); `RgbImage` holds interleaved 3-byte RGB, composited
+via WPF `PixelFormats.Rgb24`. Two rules mirror macOS MIQ:
 
-1. **Alpha is dropped** — `ReadRgb` copies exactly 3 bytes per voxel, guarded by
-   the literal `3` (not bytes-per-voxel), so `rgba32`'s 4th byte is never read.
-   The preview is opaque.
-2. **RGB bypasses intensity windowing** — the bytes are already display-ready.
-   RGB slices are excluded from the pooled percentile window (`CenterSlices` /
-   `SharedWindow` only pool `Gray` values); `Finalize` builds the `RgbImage`
+1. **Alpha is dropped** — `ReadRgb` copies exactly 3 bytes per voxel, guarded by the
+   literal `3` (not bytes-per-voxel), so `rgba32`'s 4th byte is never read. The
+   preview is opaque.
+2. **RGB bypasses intensity windowing** — the bytes are already display-ready. RGB
+   slices are excluded from the pooled percentile window (`CenterSlices` /
+   `SharedWindow` pool only `Gray` values), and `Finalize` builds the `RgbImage`
    without applying any `IntensityWindow`.
 
 ### Why no `System.Drawing`
 
 The QuickLook host ships `System.Drawing.Primitives` in its own process, which
-conflicts with any `System.Drawing` the plugin loads. All rendering is done with
-pure WPF `DrawingContext` / `BitmapSource`.
+conflicts with any `System.Drawing` the plugin loads. All rendering is pure WPF
+`DrawingContext` / `BitmapSource`.
 
 ### Progressive (volume-0-first) loading
 
-A multi-volume NIfTI is previewed volume-0-first so the first pixels appear without
+Multi-volume NIfTI is previewed volume-0-first, so the first pixels appear without
 reading the whole file — a large win on slow or network storage. Phase 1
-(`MiqParser.ParsePartial`) returns just the header + **volume 0** as a partial
-`MiqImage` (`IsPartial = true`). The initial view is byte-identical to a full load —
-the intensity window pools volume-0 center slices in both modes — so only the
-scrubber is deferred.
+(`MiqParser.ParsePartial`) returns header + **volume 0** as a partial `MiqImage`
+(`IsPartial = true`). The initial view is byte-identical to a full load (the
+intensity window pools volume-0 center slices either way), so only the scrubber is
+deferred.
 
-This applies to **every** multi-volume `.nii.gz` (decompress volume 0 only, via the
-streaming `GunzipPartial`), and to uncompressed `.nii` above
-`MiqParser.PartialLoadThreshold` (150 MB) via `ParseNiftiFirstVolume`. Below the
-threshold, or for 3-D files (where volume 0 *is* the whole payload, so there's
-nothing to defer), the full parse runs up front and the scrubber is live
-immediately. See *Known limitations* for the permanent (`ExpansionBlocked`) variant
-used when the full data can't be held.
+This covers **every** multi-volume `.nii.gz` (volume 0 only, via the streaming
+`GunzipPartial`) and uncompressed `.nii` above `MiqParser.PartialLoadThreshold`
+(150 MB) via `ParseNiftiFirstVolume`. Below the threshold, or for 3-D files (where
+volume 0 *is* the whole payload), the full parse runs up front and the scrubber is
+live immediately. See *Known limitations* for the permanent (`ExpansionBlocked`)
+variant.
 
 **Phase 2 is lazy.** The full load does *not* run automatically — that made flicking
-through previews stutter, since every glance kicked off a background decompress
-(and native libdeflate can't be cancelled mid-call, so orphaned loads piled up).
-Instead the volume row renders in a `Loadable` state (`WpfPreviewRenderer.ScrubMode`)
-with an interactive track, and the **first scrub gesture** (Alt+wheel or a click on
-the track) invokes an `onExpandRequested` callback wired from `Plugin.cs`. That runs
-the full `Parse` on a background `Task` and swaps the result in via `ExpandVolume`,
-enabling the scrubber. Just flicking through files to view volume 0 therefore
-triggers zero background work. The expansion still runs at `ThreadPriority.BelowNormal`
-and passes the viewer's `_cts` token to `MiqParser.Parse` (whose managed-gzip loop
-and uncompressed chunked read check it between chunks), so navigating away mid-load
-abandons it promptly rather than blocking the next preview.
+through previews stutter, since every glance kicked off a background decompress, and
+native libdeflate can't be cancelled mid-call so orphaned loads piled up. Instead the
+volume row renders `Loadable` (`WpfPreviewRenderer.ScrubMode`) with an interactive
+track, and the **first scrub gesture** (Alt+wheel or a track click) invokes an
+`onExpandRequested` callback wired from `Plugin.cs`, which runs the full `Parse` on a
+background `Task` and swaps the result in via `ExpandVolume`. Glancing at volume 0
+therefore triggers zero background work. Expansion runs at
+`ThreadPriority.BelowNormal` and passes the viewer's `_cts` token to
+`MiqParser.Parse` (its managed-gzip loop and uncompressed chunked read check between
+chunks), so navigating away abandons it promptly.
 
 ### Known limitations
 
-- **Files larger than ~2 GB in memory:** voxel data is held in a single
-  `byte[]`, capped at `Array.MaxLength` (≈2 GB, `MiqParser.MaxArrayBytes`). A
-  **4-D** series above that cap is previewed **volume 0 only**: `MiqParser` loads
-  just the header + first volume and sets `MiqImage.ExpansionBlocked`, which
-  suppresses background expansion and replaces the volume scrubber with a *"first
-  volume only (too large for 4-D)"* notice. The design **assumes a single volume
-  always fits in 2 GB.** Uncompressed NIfTI takes this path via
-  `ParseNiftiFirstVolume`; compressed `.nii.gz` via the existing single-volume
-  fast path (made permanent when the decompressed ISIZE exceeds the cap). A lone
-  volume that genuinely exceeds the cap (an assumed-impossible 3-D > 2 GB), or
-  any file whose uncompressed size tops the **4 GB** ceiling, falls back to a
-  clear error.
-- **gzip ISIZE is mod 2^32:** compressed files whose uncompressed size exceeds
-  4 GB report ISIZE = 0 and are handled by a streaming fallback, but the
-  resulting allocation may still exhaust memory.
-- **NRRD ASCII / hex / bzip2 encoding:** not supported by design. Re-save with
+- **Files larger than ~2 GB in memory:** voxel data is one `byte[]`, capped at
+  `Array.MaxLength` (≈2 GB, `MiqParser.MaxArrayBytes`). A **4-D** series above the
+  cap previews **volume 0 only**: `MiqParser` loads header + first volume and sets
+  `MiqImage.ExpansionBlocked`, which suppresses expansion and replaces the scrubber
+  with a *"first volume only (too large for 4-D)"* notice. Uncompressed NIfTI takes
+  this path via `ParseNiftiFirstVolume`; `.nii.gz` via the single-volume fast path
+  (made permanent when decompressed ISIZE exceeds the cap). The design **assumes a
+  single volume always fits in 2 GB** — a lone volume over the cap (an
+  assumed-impossible 3-D > 2 GB), or any file over the **4 GB** ceiling, falls back
+  to a clear error.
+- **gzip ISIZE is mod 2^32:** files whose uncompressed size exceeds 4 GB report
+  ISIZE = 0 and use a streaming fallback, but the allocation may still exhaust memory.
+- **NRRD ASCII / hex / bzip2 encoding:** unsupported by design. Re-save with
   `encoding: raw` or `encoding: gzip`.
 - **Detached NRRD headers (`.nhdr`):** out of scope; use self-contained `.nrrd`.
-- **RGBA NIfTI alpha:** `rgb24` and `rgba32` render in full colour; for
-  `rgba32` the alpha channel is dropped and the preview is opaque.
-- **NIfTI-2 with >4 D dimensions:** only the first four axes are previewed.
+- **RGBA NIfTI alpha:** dropped — `rgba32` renders in colour but opaque.
+- **NIfTI-2 with >4 dimensions:** only the first four axes are previewed.
 
 ### Unsafe code
 
-`AllowUnsafeBlocks` is enabled in both projects. The only unsafe code is two
-bit-reinterpretation helpers in `MiqCompat.cs` — `Int32BitsToSingle` and
-`Int64BitsToDouble`. These are necessary because
-`BitConverter.Int32BitsToSingle` / `Int64BitsToDouble` are not available in
-the .NET Framework 4.6.2 BCL. The implementations are deterministic and
-carry no pointer-arithmetic risk.
+`AllowUnsafeBlocks` is on in both projects for exactly two bit-reinterpretation
+helpers in `MiqCompat.cs`, `Int32BitsToSingle` and `Int64BitsToDouble`, standing in
+for `BitConverter.Int32BitsToSingle` / `Int64BitsToDouble` which the .NET Framework
+4.6.2 BCL lacks. Both are deterministic and carry no pointer-arithmetic risk.

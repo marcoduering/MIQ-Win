@@ -13,9 +13,14 @@ public static class MghParser
     {
         var header = ParseHeader(data, formatLabel);
 
-        var totalVoxels = (long)header.Width * header.Height * header.Depth * header.Volumes;
-        var required = (long)HeaderSize + totalVoxels * header.Datatype.BytesPerVoxel();
-        if (data.Length < required)
+        // ValidateDimensionExtent (in ParseHeader) bounds this product, so the
+        // multiply can't wrap; subtracting the header from data.Length rather than
+        // adding it to payloadBytes keeps the comparison overflow-free too. Same
+        // accept/reject as before for every non-overflowing header — i.e. every
+        // real file — but a wrapped product can no longer pass the check.
+        var payloadBytes = (long)header.Width * header.Height * header.Depth * header.Volumes
+                           * header.Datatype.BytesPerVoxel();
+        if (data.Length - (long)HeaderSize < payloadBytes)
             throw MiqException.TruncatedData();
 
         return new MiqImage
@@ -44,6 +49,11 @@ public static class MghParser
             throw MiqException.InvalidDimensions();
 
         var datatype = MghTypeToDatatype(type);
+
+        MiqParser.ValidateDimensionExtent(
+            new[] { width, height, depth, nframes }, datatype.BytesPerVoxel());
+        MiqParser.ValidateSlicePlaneExtent(width, height, depth);
+
         var goodRAS  = MiqBinaryReader.Int16(data, 28, littleEndian: false);
 
         var pixdim = new float[] { 1f, 1f, 1f, 1f };
