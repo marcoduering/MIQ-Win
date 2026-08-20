@@ -183,7 +183,8 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
 
         // Label detection reuses the prepared gray arrays — no extra decode.
         SegmentationLut? lut = null;
-        if (SegmentationEligible(options) && CollectLabels(prepared) is { } labels)
+        if (SegmentationEligible(options) && CollectLabels(prepared) is { } labels
+            && (IsPiecewiseConstant(prepared) ?? true))
             lut = FinishSegmentationLut(labels, options);
 
         // Label volumes map through the LUT, not the intensity window.
@@ -329,10 +330,15 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
     ///
     /// Detection is deliberately conservative: only integer or float datatypes
     /// with identity scaling are considered, every sampled value must be integral
-    /// (so a float intensity image with continuous values is rejected), and the
+    /// (so a float intensity image with continuous values is rejected), the
     /// distinct-label count must stay under <see cref="SegmentationLut.MaxLabels"/>
-    /// — so a real intensity image (many distinct or fractional values) is never
-    /// miscoloured. Sampling reuses the three center slices (the same voxels the
+    /// (a resource guard, not a discriminator — real label counts and intensity
+    /// value counts overlap completely), AND the sampled voxels must be
+    /// piecewise-constant rather than noisy — see <see cref="IsPiecewiseConstant"/>.
+    /// Integrality alone is vacuous for an integer datatype (a uint8 anatomical is
+    /// integral by construction), so piecewise-constancy is the gate that actually
+    /// separates a label map from a normalised intensity image of the same
+    /// datatype. Sampling reuses the three center slices (the same voxels the
     /// intensity window pools), so detection adds no extra read on the off path.
     /// The one exception is a single-label center sample, which triggers a
     /// full-volume-0 confirm before committing to the binary (white) LUT — see
@@ -347,7 +353,9 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
             PrepareSlice(SlicePlane.Sagittal),
             PrepareSlice(SlicePlane.Axial),
         };
-        return CollectLabels(prepared) is { } labels ? FinishSegmentationLut(labels, options) : null;
+        if (CollectLabels(prepared) is not { } labels) return null;
+        if (!(IsPiecewiseConstant(prepared) ?? true)) return null;
+        return FinishSegmentationLut(labels, options);
     }
 
     // Cheap, no-decode eligibility gate: only integer/float identity-scaled data in
@@ -385,6 +393,73 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         }
         labels.Remove(0); // background is always black; only foreground labels colour
         return labels;
+    }
+
+    // A label map is built from regions of constant value, so adjacent foreground
+    // voxels are nearly always equal; an intensity image is noisy at every voxel.
+    // This is what actually separates the two for an integer datatype, where the
+    // integrality check in CollectLabels is vacuous (any integer image passes it)
+    // and the distinct-value count overlaps completely between real label maps and
+    // normalised intensity images of the same bit depth.
+    //
+    // Measures, over the three prepared center slices, the fraction of
+    // horizontally adjacent voxel pairs that differ, counting only pairs where
+    // BOTH voxels are foreground (non-zero) — background dominates most volumes
+    // and would otherwise swamp the ratio. Adjacency runs along a stored row only
+    // (Gray is row-major, column-fastest — see GatherGray) and never wraps between
+    // rows; a non-finite voxel breaks the chain rather than pairing across the gap.
+    //
+    // Returns false (reject as intensity) when the pooled ratio exceeds 0.30;
+    // true (accept) when it does not; null (abstain — too little foreground to
+    // judge) when fewer than 256 qualifying pairs were sampled in total. Callers
+    // must treat null as "keep the existing verdict", not as a rejection — sparse
+    // masks and thin structures have little foreground and must not be rejected
+    // for lack of samples.
+    //
+    // May exit early ONLY on the reject side (>= 1024 pairs sampled AND running
+    // ratio > 0.60 — well clear of the worst real label-map transient, 0.201).
+    // There is no accept-side early exit: FinishSegmentationLut's FreeSurfer
+    // signature test and the rank-based random palette are both functions of the
+    // COMPLETE label set, so accepting must always finish decoding all three
+    // planes (e.g. wmparc has collected only 14 of its 136 labels at 2000 pairs).
+    private static bool? IsPiecewiseConstant(PreparedSlice[] prepared)
+    {
+        const long RejectMinPairs = 1024;
+        const double RejectRatio = 0.60;
+        const long MinSamplePairs = 256;
+        const double AcceptMaxRatio = 0.30;
+
+        long total = 0, diff = 0;
+        foreach (var p in prepared)
+        {
+            var g = p.Gray!;
+            var w = p.Cfg.SliceWidth;
+            var h = p.Cfg.SliceHeight;
+            for (var row = 0; row < h; row++)
+            {
+                var rowStart = row * w;
+                // 0 doubles as "no foreground predecessor": row start, background,
+                // and the voxel after a non-finite gap all suppress the pair.
+                var prev = 0;
+                for (var col = 0; col < w; col++)
+                {
+                    var v = g[rowStart + col];
+                    if (!MiqCompat.IsFinite(v)) { prev = 0; continue; }
+                    var rounded = MiqCompat.RoundToInt(v);
+                    if (rounded != 0 && prev != 0)
+                    {
+                        total++;
+                        if (rounded != prev) diff++;
+                        if (total >= RejectMinPairs && (double)diff / total > RejectRatio)
+                            return false;
+                    }
+                    prev = rounded;
+                }
+            }
+        }
+
+        if (total < MinSamplePairs) return null;
+        return (double)diff / total <= AcceptMaxRatio;
     }
 
     // Choose the final LUT from a collected label set.

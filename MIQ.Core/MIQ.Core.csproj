@@ -13,4 +13,11 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <!-- Several detection/parsing thresholds (SegmentationLut.MaxLabels,
+       MiqParser.MaxArrayBytes / PartialLoadThreshold) are internal + non-const
+       specifically as test seams; wire MIQ.Tests up to actually use them. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="MIQ.Tests" />
+  </ItemGroup>
+
 </Project>

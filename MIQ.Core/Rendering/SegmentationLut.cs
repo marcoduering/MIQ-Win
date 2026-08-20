@@ -5,23 +5,26 @@ namespace MIQ.Rendering;
 /// a rank-based <em>random</em> palette (labels sorted, hues evenly spaced at
 /// 360/n° apart with a coprime stride so value-adjacent labels are hue-distant;
 /// unknown labels fall back to the per-label hash), and a curated
-/// <em>FreeSurfer</em> palette — the canonical colours for the common
-/// <c>aseg</c> + <c>aparc</c> (Desikan-Killiany) structures, with any label not
-/// in the table falling back to the per-label hash. Label 0 is background (black,
-/// the default canvas). There is no macOS counterpart; this is Windows-only.
+/// <em>FreeSurfer</em> palette — the canonical colours for <c>aseg</c>, Desikan-
+/// Killiany <c>aparc</c>, Destrieux <c>aparc.a2009s</c>, and wmparc's gyral WM
+/// parcels, with any label not in the table falling back to the per-label hash.
+/// Label 0 is background (black, the default canvas). There is no macOS
+/// counterpart; this is Windows-only.
 /// </summary>
 public sealed class SegmentationLut
 {
     /// Upper bound on distinct labels (in the sampled center slices) for a volume
-    /// to be treated as a segmentation; above this the data is assumed to be
-    /// intensity. Chosen to clear standard FreeSurfer with margin while rejecting
-    /// dense 8-bit intensity images: a whole aparc+aseg has only ~110 distinct
-    /// labels (aseg ~45), and a center-slice sample can never exceed the volume's
-    /// total, so 160 leaves headroom; a typical uint8 anatomical spans most of
-    /// 0..255 (~200+ distinct) and is rejected. Non-const + internal so tests can
-    /// adjust it. (Rich parcellations beyond ~160 distinct, e.g. Destrieux or
-    /// subfield segs, fall back to grayscale — out of scope for the common subset.)
-    internal static int MaxLabels = 160;
+    /// to be treated as a segmentation. NOT a discriminator between label maps and
+    /// intensity images — real label counts and intensity value counts overlap
+    /// completely (greyscale spans 42-127 distinct in testing; genuine label maps
+    /// span 11-136; a Destrieux parcellation at 131 has MORE distinct values than
+    /// a normalised T1 at 127), so no count threshold separates them in either
+    /// direction. That job belongs to piecewise-constancy (see
+    /// <see cref="MiqVolume.IsPiecewiseConstant"/>). This cap exists only as a
+    /// resource guard against pathological inputs and as a test seam (non-const +
+    /// internal so tests can lower it). Set well above dense atlases (Schaefer-1000,
+    /// HCP-MMP 360) so legitimate rich parcellations are never silently rejected.
+    internal static int MaxLabels = 4096;
 
     private readonly bool _useFreeSurfer;
     private readonly bool _monochromeWhite;
@@ -232,6 +235,89 @@ public sealed class SegmentationLut
         (255, 192, 32),  // 35 insula
     };
 
+    // Destrieux (aparc.a2009s) cortical colours, indexed by (label % 100), 0..75.
+    // Values from FreeSurferColorLUT.txt (ctx_lh_*/ctx_rh_* 11100-11175 /
+    // 12100-12175; lh and rh share a colour, same convention as Cortical above).
+    private static readonly (byte r, byte g, byte b)[] Destrieux =
+    {
+        (0, 0, 0),       // 00 Unknown
+        (23, 220, 60),   // 01 G_and_S_frontomargin
+        (23, 60, 180),   // 02 G_and_S_occipital_inf
+        (63, 100, 60),   // 03 G_and_S_paracentral
+        (63, 20, 220),   // 04 G_and_S_subcentral
+        (13, 0, 250),    // 05 G_and_S_transv_frontopol
+        (26, 60, 0),     // 06 G_and_S_cingul-Ant
+        (26, 60, 75),    // 07 G_and_S_cingul-Mid-Ant
+        (26, 60, 150),   // 08 G_and_S_cingul-Mid-Post
+        (25, 60, 250),   // 09 G_cingul-Post-dorsal
+        (60, 25, 25),    // 10 G_cingul-Post-ventral
+        (180, 20, 20),   // 11 G_cuneus
+        (220, 20, 100),  // 12 G_front_inf-Opercular
+        (140, 60, 60),   // 13 G_front_inf-Orbital
+        (180, 220, 140), // 14 G_front_inf-Triangul
+        (140, 100, 180), // 15 G_front_middle
+        (180, 20, 140),  // 16 G_front_sup
+        (23, 10, 10),    // 17 G_Ins_lg_and_S_cent_ins
+        (225, 140, 140), // 18 G_insular_short
+        (180, 60, 180),  // 19 G_occipital_middle
+        (20, 220, 60),   // 20 G_occipital_sup
+        (60, 20, 140),   // 21 G_oc-temp_lat-fusifor
+        (220, 180, 140), // 22 G_oc-temp_med-Lingual
+        (65, 100, 20),   // 23 G_oc-temp_med-Parahip
+        (220, 60, 20),   // 24 G_orbital
+        (20, 60, 220),   // 25 G_pariet_inf-Angular
+        (100, 100, 60),  // 26 G_pariet_inf-Supramar
+        (220, 180, 220), // 27 G_parietal_sup
+        (20, 180, 140),  // 28 G_postcentral
+        (60, 140, 180),  // 29 G_precentral
+        (25, 20, 140),   // 30 G_precuneus
+        (20, 60, 100),   // 31 G_rectus
+        (60, 220, 20),   // 32 G_subcallosal
+        (60, 60, 220),   // 33 G_temp_sup-G_T_transv
+        (220, 60, 220),  // 34 G_temp_sup-Lateral
+        (65, 220, 60),   // 35 G_temp_sup-Plan_polar
+        (25, 140, 20),   // 36 G_temp_sup-Plan_tempo
+        (220, 220, 100), // 37 G_temporal_inf
+        (180, 60, 60),   // 38 G_temporal_middle
+        (61, 20, 220),   // 39 Lat_Fis-ant-Horizont
+        (61, 20, 60),    // 40 Lat_Fis-ant-Vertical
+        (61, 60, 100),   // 41 Lat_Fis-post
+        (25, 25, 25),    // 42 Medial_wall
+        (140, 20, 60),   // 43 Pole_occipital
+        (220, 180, 20),  // 44 Pole_temporal
+        (63, 180, 180),  // 45 S_calcarine
+        (221, 20, 10),   // 46 S_central
+        (221, 20, 100),  // 47 S_cingul-Marginalis
+        (221, 60, 140),  // 48 S_circular_insula_ant
+        (221, 20, 220),  // 49 S_circular_insula_inf
+        (61, 220, 220),  // 50 S_circular_insula_sup
+        (100, 200, 200), // 51 S_collat_transv_ant
+        (10, 200, 200),  // 52 S_collat_transv_post
+        (221, 220, 20),  // 53 S_front_inf
+        (141, 20, 100),  // 54 S_front_middle
+        (61, 220, 100),  // 55 S_front_sup
+        (141, 60, 20),   // 56 S_interm_prim-Jensen
+        (143, 20, 220),  // 57 S_intrapariet_and_P_trans
+        (101, 60, 220),  // 58 S_oc_middle_and_Lunatus
+        (21, 20, 140),   // 59 S_oc_sup_and_transversal
+        (61, 20, 180),   // 60 S_occipital_ant
+        (221, 140, 20),  // 61 S_oc-temp_lat
+        (141, 100, 220), // 62 S_oc-temp_med_and_Lingual
+        (221, 100, 20),  // 63 S_orbital_lateral
+        (181, 200, 20),  // 64 S_orbital_med-olfact
+        (101, 20, 20),   // 65 S_orbital-H_Shaped
+        (101, 100, 180), // 66 S_parieto_occipital
+        (181, 220, 20),  // 67 S_pericallosal
+        (21, 140, 200),  // 68 S_postcentral
+        (21, 20, 240),   // 69 S_precentral-inf-part
+        (21, 20, 200),   // 70 S_precentral-sup-part
+        (21, 20, 60),    // 71 S_suborbital
+        (101, 60, 60),   // 72 S_subparietal
+        (21, 180, 180),  // 73 S_temporal_inf
+        (223, 220, 60),  // 74 S_temporal_sup
+        (221, 60, 60),   // 75 S_temporal_transverse
+    };
+
     private static readonly Dictionary<int, (byte r, byte g, byte b)> FreeSurfer = BuildFreeSurfer();
 
     private static Dictionary<int, (byte r, byte g, byte b)> BuildFreeSurfer()
@@ -292,6 +378,32 @@ public sealed class SegmentationLut
             d[1000 + i] = Cortical[i];
             d[2000 + i] = Cortical[i];
         }
+
+        // Destrieux (aparc.a2009s) cortical labels: lh = 11100+i, rh = 12100+i.
+        for (var i = 0; i < Destrieux.Length; i++)
+        {
+            d[11100 + i] = Destrieux[i];
+            d[12100 + i] = Destrieux[i];
+        }
+
+        // wmparc gyral WM labels: lh = 3000+i, rh = 4000+i, indexed the same as
+        // Cortical (including index 0, wm-lh/rh-unknown). FreeSurferColorLUT.txt
+        // defines these as the exact (255-r, 255-g, 255-b) inverse of the matching
+        // Desikan cortical colour — verified against the published table for
+        // every one of the 36 structures, index 0 included — so they're derived
+        // here rather than duplicated as a second hand-copied 70-entry table.
+        for (var i = 0; i < Cortical.Length; i++)
+        {
+            var (r, g, b) = Cortical[i];
+            var inv = ((byte)(255 - r), (byte)(255 - g), (byte)(255 - b));
+            d[3000 + i] = inv;
+            d[4000 + i] = inv;
+        }
+
+        // wmparc leftovers: white matter not assigned to a gyral parcel.
+        d[5001] = (20, 30, 40); // Left-UnsegmentedWhiteMatter
+        d[5002] = (20, 30, 40); // Right-UnsegmentedWhiteMatter
+
         return d;
     }
 }
