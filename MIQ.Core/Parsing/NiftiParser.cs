@@ -9,11 +9,24 @@ public static class NiftiParser
     public static MiqImage Parse(byte[] data, string? formatLabel = null)
     {
         var header = ParseHeader(data, formatLabel);
-        // FIXME(harden): no payload-extent check — dims may exceed the data.
-        // Any fix belongs HERE, not in ParseHeader: the vol-0-first partial
-        // loads call that on a 1 KB probe and would silently stop partial-loading.
-        if (data.Length < header.VoxOffset)
+
+        // ValidateSlicePlaneExtent (in ParseHeader) bounds any pairwise product of
+        // width/height/depth, so this triple product can't wrap; subtracting
+        // VoxOffset from data.Length rather than adding it to volumeBytes keeps
+        // the comparison overflow-free too (same pattern as MghParser/MifParser).
+        // Volume 0 only, not x Volumes: this belongs HERE, not in ParseHeader
+        // (called on a 1 KB probe by the vol-0-first partial loads, which must
+        // keep working on a file containing only volume 0), and volume 0 is what
+        // every first render decodes regardless of load path. A file truncated
+        // beyond volume 0 already degrades gracefully — Voxel() bounds-checks
+        // every read against PayloadCount and zero-fills out of range — so this
+        // guard's job is purely to reject early, before slice extraction attempts
+        // to allocate a plane for data that was never there.
+        var volumeBytes = (long)header.Width * header.Height * header.Depth
+                           * header.Datatype.BytesPerVoxel();
+        if (data.Length - (long)header.VoxOffset < volumeBytes)
             throw MiqException.TruncatedData();
+
         return new MiqImage
         {
             Header = header,
