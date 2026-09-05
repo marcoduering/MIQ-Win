@@ -16,6 +16,9 @@ public sealed class MiqException : Exception
     public static MiqException InvalidDimensions() =>
         new("Invalid or missing image dimensions.");
 
+    public static MiqException InvalidVoxOffset(double value) =>
+        new($"NIfTI data offset out of range: {value}.");
+
     public static MiqException TruncatedData() =>
         new("File appears truncated.");
 

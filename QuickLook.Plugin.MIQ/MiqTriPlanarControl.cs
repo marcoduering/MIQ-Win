@@ -96,6 +96,9 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
     // Crosshairs stay hidden until the user first navigates.
     private bool _interacted;
 
+    // Sticky: a render that threw has already been reported to the host panel.
+    private bool _renderFailed;
+
     internal MiqTriPlanarControl(
         MiqVolume volume,
         IntensityWindow.Bounds? window,
@@ -254,7 +257,31 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         var sz = RenderSize;
         dc.DrawRectangle(_settings.BackgroundBrush, null, new Rect(0, 0, sz.Width, sz.Height));
         if (sz.Width < 2 || sz.Height < 2) return;
+        if (_renderFailed) return; // already reported; don't retry every frame
 
+        try
+        {
+            RenderContent(dc, sz);
+        }
+        catch (Exception ex)
+        {
+            // Slice decode runs HERE, on the UI thread: every scroll / click / scrub
+            // re-decodes through Slice() during the render pass. Plugin.cs wraps the
+            // cold path so a bad file shows a message instead of crashing, but that
+            // net does not extend to renders triggered by later interaction — and an
+            // exception escaping OnRender is unhandled, taking QuickLook's whole
+            // process down rather than just this preview. Report and stop drawing.
+            _renderFailed = true;
+            var message = ex.Message;
+            // Deferred: ShowMessage mutates the visual tree, which must not happen
+            // inside a render pass.
+            Dispatcher.BeginInvoke(() =>
+                (Parent as MiqPreviewControl)?.ShowMessage(message, error: true));
+        }
+    }
+
+    private void RenderContent(DrawingContext dc, Size sz)
+    {
         var frame = ComputeFrame(sz);
         foreach (var (plane, ax, ay) in Layout)
         {

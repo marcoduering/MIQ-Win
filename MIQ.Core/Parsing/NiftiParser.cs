@@ -71,8 +71,8 @@ public static class NiftiParser
         var datatype = ReadAndValidateDatatype(data, datatypeOffset: 70, bitpixOffset: 72, littleEndian);
 
         var pixdim = MiqBinaryReader.Float32Array(data, 76, count: 8, littleEndian);
-        // FIXME(harden): (int)float diverges — net8 saturates, net462 does not.
-        var voxOffset = (int)MiqBinaryReader.Float32(data, 108, littleEndian);
+        // float→double widening is exact, so the check below sees the stored value.
+        var voxOffset = NarrowVoxOffset(MiqBinaryReader.Float32(data, 108, littleEndian));
         var sclSlope = MiqBinaryReader.Float32(data, 112, littleEndian);
         var sclInter = MiqBinaryReader.Float32(data, 116, littleEndian);
         var qformCode = MiqBinaryReader.Int16(data, 252, littleEndian);
@@ -118,15 +118,13 @@ public static class NiftiParser
         if (data.Length < 540) throw MiqException.TruncatedData();
 
         var dim = MiqBinaryReader.Int64Array(data, 16, count: 8, littleEndian);
-        // FIXME(harden): unchecked narrowing — a dim past int.MaxValue becomes 1.
-        var dimensions = ParseDimensions(Array.ConvertAll(dim, v => (int)v));
+        var dimensions = ParseDimensions(NarrowDimensions(dim));
 
         var datatype = ReadAndValidateDatatype(data, datatypeOffset: 12, bitpixOffset: 14, littleEndian);
 
         var pixdim = Array.ConvertAll(
             MiqBinaryReader.Float64Array(data, 104, count: 4, littleEndian), v => (float)v);
-        // FIXME(harden): unchecked narrowing of a 64-bit offset.
-        var voxOffset = (int)MiqBinaryReader.Int64(data, 168, littleEndian);
+        var voxOffset = NarrowVoxOffset(MiqBinaryReader.Int64(data, 168, littleEndian));
         var sclSlope = (float)MiqBinaryReader.Float64(data, 176, littleEndian);
         var sclInter = (float)MiqBinaryReader.Float64(data, 184, littleEndian);
         var qformCode = MiqBinaryReader.Int32(data, 344, littleEndian);
@@ -198,6 +196,67 @@ public static class NiftiParser
         if (bitpix != datatype.BytesPerVoxel() * 8)
             throw MiqException.UnsupportedDatatype(raw);
         return datatype;
+    }
+
+    /// vox_offset is wider than the <c>int</c> it ends up in — a float32 in
+    /// NIfTI-1, an int64 in NIfTI-2 — and a bare <c>(int)</c> cast of a value that
+    /// doesn't fit produces an unspecified result the C# spec declines to define.
+    ///
+    /// Measured on net8/x64 (JIT-opaque values, so not compile-time folding):
+    /// <c>(int)</c> of 1e10, +Inf, NaN and -1e10 all yield <b>int.MinValue</b> — it
+    /// does <i>not</i> saturate, contrary to what this file's FIXME and CLAUDE.md
+    /// both asserted for years. So the real defect was never a net8-vs-net462
+    /// divergence: on <i>both</i> targets int.MinValue is floored straight back to
+    /// the header size by the caller's Math.Max, and a file declaring an absurd
+    /// vox_offset silently reads its payload from 352 and renders garbage instead of
+    /// reporting anything. Uniformly wrong is worse than divergent, not better.
+    ///
+    /// Resolving it here removes the dependence on unspecified behaviour altogether,
+    /// which is what actually matters: the guard holds whatever any future runtime
+    /// decides that cast should mean.
+    ///
+    /// Non-finite and negative values return 0, which the caller floors to the
+    /// header size — exactly what the cast already did on both targets, so nothing
+    /// that previews today changes (and vox_offset = 0 is the common "data starts
+    /// after the header" spelling). Only an offset genuinely past int range is
+    /// rejected: no real file has one, and reading from the wrong place silently is
+    /// worse than a clear error.
+    private static int NarrowVoxOffset(double value)
+    {
+        if (double.IsNaN(value) || value < 0) return 0;
+        if (value > int.MaxValue) throw MiqException.InvalidVoxOffset(value);
+        return (int)value;
+    }
+
+    private static int NarrowVoxOffset(long value)
+    {
+        if (value < 0) return 0;
+        if (value > int.MaxValue) throw MiqException.InvalidVoxOffset(value);
+        return (int)value;
+    }
+
+    /// NIfTI-2 stores dim[] as int64. Truncating to int keeps only the low 32 bits,
+    /// which turns an unrenderable size into a plausible one — 2^32+1 becomes 1 —
+    /// so ValidateDimensionExtent and ValidateSlicePlaneExtent never see the value
+    /// they exist to reject, and the file renders as a 1-voxel axis instead.
+    ///
+    /// Only the slots <see cref="ParseDimensions"/> actually reads are checked:
+    /// dim[0] (ndim) and dim[1..upper]. Trailing slots past ndim are routinely junk
+    /// in real files — rejecting on those would turn away valid data.
+    private static int[] NarrowDimensions(long[] dim)
+    {
+        var ndim = dim[0];
+        // Mirrors ParseDimensions' clamp so exactly the used slots are validated.
+        var upper = ndim < 1 ? 0 : (int)Math.Max(3, Math.Min(7, ndim));
+
+        var narrowed = new int[dim.Length];
+        for (var i = 0; i < dim.Length; i++)
+        {
+            if (i <= upper && (dim[i] > int.MaxValue || dim[i] < int.MinValue))
+                throw MiqException.InvalidDimensions();
+            narrowed[i] = (int)dim[i]; // unused trailing slots: value is irrelevant
+        }
+        return narrowed;
     }
 
     private static int[] ParseDimensions(int[] dim)
