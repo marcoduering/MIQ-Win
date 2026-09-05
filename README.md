@@ -1,6 +1,6 @@
 <img src="docs/icon-180.png" alt="MIQ-Win icon" width="60" height="60">
 
-# MIQ-Win — Medical Image QuickLook for Windows
+# MIQ-Win: Medical Image QuickLook for Windows
 
 MIQ-Win is a lightweight plugin for the [**Windows QuickLook**](https://github.com/QL-Win/QuickLook) implementation. It previews medical volume images in research formats. Press **Space** on a supported file in Explorer (or any QuickLook-enabled host) to instantly get an **interactive orthogonal slice view** (coronal, sagittal, axial) alongside a metadata panel:
 
@@ -10,14 +10,24 @@ MIQ-Win is a lightweight plugin for the [**Windows QuickLook**](https://github.c
 
 MIQ-Win is the Windows counterpart to [**MIQ**](https://github.com/marcoduering/MIQ), the macOS Quick Look extension, and reimplements the core functionality in C#.
 
-## Supported Formats
+## Main Features and Supported Formats
+
+- **Instant, interactive preview** — press Space in Explorer for the 2×2 orthogonal slice and metadata view
+- **Built for speed** — native [libdeflate](https://github.com/ebiggers/libdeflate) gzip decompression, and multi-volume NIfTI that previews its first volume without waiting for the rest
+- **4D support** — scrub through timepoints/volumes interactively
+- **Segmentation coloring** — including automatic label-color detection for FreeSurfer-style parcellations
+- **Interactive controls** — slice scrolling, linked crosshairs, and window/level adjustment right in the preview
+- **Fully configurable** — orientation, intensity windowing, segmentation palette, axis-label and crosshair colors, and metadata panel content/order, from a plain-text settings file
+- **No admin rights required** — installs into QuickLook's own plugin folder
+
+Supported formats:
 
 - :white_check_mark: **NIfTI-1 & NIfTI-2** — `.nii`, `.nii.gz`
 - :white_check_mark: **FreeSurfer** — `.mgh`, `.mgz`, `.mgh.gz`
 - :white_check_mark: **MRtrix** — `.mif`, `.mif.gz`
-- :white_check_mark: **NRRD** — `.nrrd` (single-file; `raw` and `gzip` encodings)
+- :white_check_mark: **NRRD** — `.nrrd` *(only the single-file variant with attached header; `raw` and `gzip` encodings)*
 
-Most formats are supported uncompressed and gzip-compressed. The plugin determines the format from the file extension, so it is **important that files have the correct extensions**. Compound extensions like `.nii.gz` work directly — the plugin matches by path suffix, independent of Windows file associations. NRRD support covers self-contained `.nrrd` files only — detached headers (`.nhdr` with a separate data file) are not previewable.
+Most formats are supported uncompressed and gzip-compressed. The plugin determines the format from the file extension, so it is **important that files have the correct extensions**. Compound extensions like `.nii.gz` work directly — the plugin matches by path suffix, independent of Windows file associations. Detached NRRD headers (`.nhdr` with a separate data file) are not previewable.
 
 ## Installation & Updates
 
@@ -63,9 +73,7 @@ Preferences live in a plain-text **`MIQ.settings.ini`** — adjust intensity sca
 
 ### Orientation
 
-By default, MIQ-Win displays data **as stored on disk**, without reorienting. Depending on acquisition and processing, images may then appear upside down, mirrored, or rotated. This is intentional: it lets you quickly inspect the raw data including its stored orientation.
-
-For files that carry orientation metadata, two canonical anatomical views are also available via the `Orientation` key in `MIQ.settings.ini`:
+By default, MIQ-Win displays data **as stored on disk**, without reorienting. Images may appear upside down, mirrored, or rotated depending on acquisition. This is by design, so you can inspect the raw data as-is. For files that carry orientation metadata, two canonical anatomical views are also available via the `Orientation` key in `MIQ.settings.ini`:
 
 - **stored** (default): render axes exactly as stored.
 - **neurological**: canonical anatomical view, patient-LEFT on the viewer's left (coronal/axial).
@@ -92,9 +100,7 @@ Uncompressed files load instantly. All gzip-compressed files (`.nii.gz`, `.mgh.g
 
 ## Active Development
 
-This plugin is still in development and was created with the support of AI coding agents. Please report issues or feature suggestions via [**GitHub Issues**](https://github.com/marcoduering/MIQ-Win/issues). Contributions are welcome.
-
-If MIQ-Win is useful to you and you'd like to support its development, you can [**sponsor the project**](https://github.com/sponsors/marcoduering). Entirely optional, always appreciated.
+MIQ-Win is free and open source, in active development, and was created with the support of AI coding agents. Report issues or feature suggestions via [**GitHub Issues**](https://github.com/marcoduering/MIQ-Win/issues), or see [CONTRIBUTING.md](./CONTRIBUTING.md) to contribute. If MIQ-Win is useful to you, consider [**sponsoring the project**](https://github.com/sponsors/marcoduering) (entirely optional, always appreciated).
 
 ## Disclaimer & License
 
