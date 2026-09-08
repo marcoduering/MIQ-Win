@@ -30,6 +30,12 @@ public sealed class MiqHeader
     /// Overrides the display format name; set by parsers that detect compression.
     public string? FormatLabel { get; init; }
 
+    /// Overrides the datatype name shown in the metadata panel. Set when a parser
+    /// widens the stored datatype so <see cref="Datatype"/> no longer names what the
+    /// file actually holds (MIF `Bit`, unpacked to uint8 at parse time), letting the
+    /// panel report the spelling the header used. Null = use Datatype.Label().
+    public string? DatatypeLabel { get; init; }
+
     /// Authoritative anatomical mapping, or null if undeterminable.
     public OrientationFrame? OrientationFrame { get; init; }
 

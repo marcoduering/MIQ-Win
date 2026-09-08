@@ -1,5 +1,7 @@
 using System.Buffers.Binary;
+using System.Text;
 using MIQ.Parsing;
+using MIQ.Rendering;
 using Xunit;
 
 namespace MIQ.Tests;
@@ -269,4 +271,97 @@ public class ParserGuardTests
         // an ordinary MiqException — the assertion is "reports", not "which one".
         Assert.Throws<MiqException>(() =>
             MghParser.Parse(MghFile(w: 3577, h: 42799, d: 92737, nframes: 649657, payloadBytes: 0)));
+
+    // ── MIF: the Bit datatype ───────────────────────────────────────────────
+    //
+    // MRtrix writes masks as `Bit`: 8 voxels per byte, MSB-first, packed
+    // contiguously across the whole payload with no per-row or per-slice
+    // alignment. MifParser unpacks it to one byte per voxel at the parse
+    // boundary, so no sub-byte width ever reaches the renderer. These pin the two
+    // decisions that separate a correct mask from noise — the bit order, and the
+    // ceil(n/8) payload sizing — plus the accept half of each.
+
+    /// Minimal MIF: ASCII header with `file: .`, so the payload follows END directly.
+    static byte[] MifFile(string datatype, int[] dim, byte[] payload)
+    {
+        var axes = string.Join(",", Enumerable.Range(0, dim.Length).Select(i => "+" + i));
+        var text = "mrtrix image\n"
+                 + "dim: " + string.Join(",", dim) + "\n"
+                 + "vox: " + string.Join(",", dim.Select(_ => "1")) + "\n"
+                 + "layout: " + axes + "\n"
+                 + "datatype: " + datatype + "\n"
+                 + "file: .\n"
+                 + "END\n";
+        var head = Encoding.ASCII.GetBytes(text);
+        var file = new byte[head.Length + payload.Length];
+        head.CopyTo(file.AsSpan());
+        payload.CopyTo(file.AsSpan(head.Length));
+        return file;
+    }
+
+    [Fact]
+    public void Mif_Bit_UnpacksMsbFirstWithinEachByte()
+    {
+        // 0x96 = 1001 0110. MSB-first (MRtrix) takes voxel 0 from bit 7, so the
+        // elements read left-to-right as written; LSB-first would reverse each byte,
+        // which on a real mask combs every boundary at an 8-voxel period.
+        var image = MifParser.Parse(MifFile("Bit", new[] { 4, 2, 1 }, new byte[] { 0x96 }));
+
+        // Unpacked to a standalone uint8 buffer, so element i is simply Storage[i].
+        Assert.Equal(MiqDatatype.Uint8, image.Header.Datatype);
+        Assert.Equal(0, image.PayloadOffset);
+        Assert.Equal(new byte[] { 1, 0, 0, 1, 0, 1, 1, 0 }, image.Storage);
+    }
+
+    [Fact]
+    public void Mif_Bit_DropsTrailingPaddingBits()
+    {
+        // 9 voxels = 2 bytes, so the final byte holds 1 real bit and 7 of padding.
+        // Padding must not become voxels: 0xFF would otherwise add 7 stray foreground
+        // values, which on a mask reads as a bright smear past the last real voxel.
+        var image = MifParser.Parse(MifFile("Bit", new[] { 3, 3, 1 }, new byte[] { 0x00, 0xFF }));
+
+        Assert.Equal(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 1 }, image.Storage);
+    }
+
+    [Fact]
+    public void Mif_Bit_PayloadOneByteShort_Throws() =>
+        // 9 voxels need ceil(9/8) = 2 bytes.
+        Assert.Throws<MiqException>(() =>
+            MifParser.Parse(MifFile("Bit", new[] { 3, 3, 1 }, new byte[1])));
+
+    [Fact]
+    public void Mif_Bit_PayloadExactlyCeilOfEighth_Parses()
+    {
+        // The accept half of the guard above, and the one that would fail if the
+        // size were computed as n * BytesPerVoxel() — the datatype now reports uint8,
+        // so that spelling would demand 9 bytes and reject every real bit file.
+        var image = MifParser.Parse(MifFile("Bit", new[] { 3, 3, 1 }, new byte[2]));
+
+        Assert.Equal(3, image.Header.Width);
+        Assert.Equal(9, image.Storage.Length);
+    }
+
+    [Fact]
+    public void Mif_Bit_MetadataReportsTheHeaderSpelling()
+    {
+        // Datatype is widened to uint8 for the renderer; the panel must still say what
+        // the file says, or a Bit mask silently claims to be something it is not.
+        var image = MifParser.Parse(MifFile("Bit", new[] { 4, 2, 1 }, new byte[] { 0x96 }));
+        var lines = new MiqMetadata(image.Header, "MIF", null).AsDisplayLines();
+
+        Assert.Contains(lines, l => l.Label == "Datatype" && l.Value == "bit");
+    }
+
+    [Fact]
+    public void Mif_NonBitDatatype_IsUnaffected()
+    {
+        // The other half of the ParseDatatype change: ordinary MIF still reports its
+        // own datatype, keeps the file-backed payload offset, and sets no label override.
+        var image = MifParser.Parse(MifFile("UInt16LE", new[] { 2, 2, 2 }, new byte[16]));
+
+        Assert.Equal(MiqDatatype.Uint16, image.Header.Datatype);
+        Assert.Null(image.Header.DatatypeLabel);
+        Assert.True(image.PayloadOffset > 0);
+    }
 }

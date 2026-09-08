@@ -42,7 +42,7 @@ public sealed class MiqMetadata
         if (_orientation is { } o)
             entries.Add(new("Orientation", o));
 
-        entries.Add(new("Datatype", _h.Datatype.Label()));
+        entries.Add(new("Datatype", _h.DatatypeLabel ?? _h.Datatype.Label()));
         entries.Add(new("Volumes", _h.Volumes.ToString(inv)));
 
         if (Scaling() is { } s)

@@ -97,7 +97,7 @@ public static class MifParser
 
         if (!fields.TryGetValue("datatype", out var dtStr))
             throw new MiqException("MIF header: missing 'datatype' field.");
-        var (datatype, littleEndian) = ParseDatatype(dtStr);
+        var (datatype, littleEndian, isBit) = ParseDatatype(dtStr);
 
         // dim is validated positive and ≥3 entries above. MRtrix axes 0/1/2 are
         // the spatial ones, so they are the trio that forms the slice planes.
@@ -115,9 +115,25 @@ public static class MifParser
         // (and still rejects a payloadOffset past the end, which goes negative).
         long totalElements = 1;
         foreach (var d in dim) totalElements *= d;
-        var payloadBytes = totalElements * datatype.BytesPerVoxel();
+        // Bit packs 8 voxels per byte with no per-row or per-slice alignment, so the
+        // payload is ceil(n/8) bytes -- NOT n * BytesPerVoxel(), which reports the
+        // post-unpack width of 1. The final byte may hold up to 7 padding bits.
+        var payloadBytes = isBit
+            ? (totalElements + 7) / 8
+            : totalElements * datatype.BytesPerVoxel();
         if (data.Length - (long)payloadOffset < payloadBytes)
             throw MiqException.TruncatedData();
+
+        // Expand Bit to one byte per voxel HERE, at the parse boundary, so everything
+        // downstream sees an ordinary contiguous uint8 payload: the strides below index
+        // ELEMENTS, and unpacking bit i to byte i preserves that indexing exactly, for
+        // any layout. Costs 8x the payload in memory (a mask is small) and buys an
+        // untouched renderer -- see ParseDatatype for why no sub-byte MiqDatatype.
+        if (isBit)
+        {
+            data = UnpackBits(data, payloadOffset, totalElements);
+            payloadOffset = 0;
+        }
 
         var (elementStrides, baseElementIndex) = ComputeStrides(dim, layout);
         // vox may contain NaN for non-spatial dimensions (e.g. time axis); substitute 1.
@@ -155,6 +171,8 @@ public static class MifParser
             SrowY         = new float[] { 0f, 0f, 0f, 0f },
             SrowZ         = new float[] { 0f, 0f, 0f, 0f },
             FormatLabel   = formatLabel,
+            // Datatype now reads uint8 for a Bit file; report what the header said.
+            DatatypeLabel = isBit ? "bit" : null,
             OrientationFrame = orientationFrame,
         };
 
@@ -166,6 +184,47 @@ public static class MifParser
             ElementStrides   = elementStrides,
             BaseElementIndex = baseElementIndex,
         };
+    }
+
+    /// Expands a bit-packed payload to one byte per voxel (0 or 1).
+    ///
+    /// Bit ordering is MSB-first WITHIN each byte -- voxel i lives at
+    /// <c>data[i/8] &amp; (0x80 >> (i%8))</c>, matching MRtrix BITMASK (0x01U &lt;&lt; 7).
+    /// Verified empirically against a maskfilter-produced mask: MSB-first yields a
+    /// coherent mask whose x-transition count matches y and z, while LSB-first triples
+    /// it and combs every boundary at an 8-voxel period.
+    private static byte[] UnpackBits(byte[] data, int payloadOffset, long totalElements)
+    {
+        // The unpacked buffer is one byte per voxel, so it must fit a single byte[].
+        // ValidateDimensionExtent only rules out long overflow, not the CLR array cap.
+        if (totalElements > MiqParser.MaxArrayBytes)
+            throw new MiqException("MIF: bit volume is too large to unpack.");
+
+        var n = (int)totalElements;
+        var unpacked = new byte[n];
+        var src = payloadOffset;
+        var i = 0;
+
+        // Whole bytes: 8 voxels each, bit 7 (0x80) being the LOWEST element index.
+        for (var end = n - 7; i < end; src++)
+        {
+            int b = data[src];
+            unpacked[i]     = (byte)((b >> 7) & 1);
+            unpacked[i + 1] = (byte)((b >> 6) & 1);
+            unpacked[i + 2] = (byte)((b >> 5) & 1);
+            unpacked[i + 3] = (byte)((b >> 4) & 1);
+            unpacked[i + 4] = (byte)((b >> 3) & 1);
+            unpacked[i + 5] = (byte)((b >> 2) & 1);
+            unpacked[i + 6] = (byte)((b >> 1) & 1);
+            unpacked[i + 7] = (byte)(b & 1);
+            i += 8;
+        }
+
+        // Tail: the last byte carries 1-7 real bits; the remainder is padding we drop.
+        for (; i < n; i++)
+            unpacked[i] = (byte)((data[payloadOffset + (i >> 3)] >> (7 - (i & 7))) & 1);
+
+        return unpacked;
     }
 
     // ── Stride computation (port of MIFAxisLayout.swift) ────────────────────
@@ -218,7 +277,13 @@ public static class MifParser
         return offset;
     }
 
-    private static (MiqDatatype datatype, bool littleEndian) ParseDatatype(string s)
+    /// Returns the datatype the RENDERER will see, which is not always the one the
+    /// header names: MRtrix `Bit` is reported as <see cref="MiqDatatype.Uint8"/> with
+    /// <c>isBit</c> set, and <see cref="BuildImage"/> unpacks the payload to match.
+    /// MiqDatatype deliberately gains no sub-byte member -- every consumer of
+    /// BytesPerVoxel() assumes an integral width, including both hot decode loops and
+    /// ScanVolume0, so the widening happens here at the parse boundary instead.
+    private static (MiqDatatype datatype, bool littleEndian, bool isBit) ParseDatatype(string s)
     {
         s = s.Trim();
         var le = true;  // default: little-endian (standard on Windows / x86-64)
@@ -234,6 +299,11 @@ public static class MifParser
             s  = s.Substring(0, s.Length - 2);
         }
 
+        // Bit carries no endianness (MRtrix writes a bare "Bit"), and the LE/BE strip
+        // above cannot have consumed any of it, so this sees the header spelling as-is.
+        if (string.Equals(s, "bit", StringComparison.OrdinalIgnoreCase))
+            return (MiqDatatype.Uint8, le, true);
+
         var datatype = s.ToLowerInvariant() switch
         {
             "uint8"   or "uint8_t"  => MiqDatatype.Uint8,
@@ -247,7 +317,7 @@ public static class MifParser
             _ => throw new MiqException($"MIF: unsupported datatype '{s}'."),
         };
 
-        return (datatype, le);
+        return (datatype, le, false);
     }
 
     private static int[] ParseIntList(string s)
