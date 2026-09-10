@@ -327,11 +327,20 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
     }
 
     // Six significant digits, matching the macOS readout (and the Scaling row);
-    // integral values render with no decimal point. Non-finite → placeholder.
+    // integral values render with no decimal point.
+    //
+    // Non-finite values are NAMED rather than shown as a placeholder. NaN is real,
+    // meaningful data in this domain — it is how masked statistical maps, DTI
+    // metrics and registered volumes spell "no value here" — so a reader inspecting
+    // a voxel needs to know they are looking at NaN specifically, not at something
+    // the viewer declined to render. The spellings are written out literally rather
+    // than left to ToString: the invariant culture's infinity symbol differs between
+    // this plugin's net462 runtime and the net8 core.
     private static string FormatVoxelValue(float v) =>
-        float.IsNaN(v) || float.IsInfinity(v)
-            ? "—"
-            : v.ToString("G6", CultureInfo.InvariantCulture);
+        float.IsNaN(v) ? "NaN"
+        : float.IsPositiveInfinity(v) ? "+Inf"
+        : float.IsNegativeInfinity(v) ? "-Inf"
+        : v.ToString("G6", CultureInfo.InvariantCulture);
 
     private void DrawCrosshair(DrawingContext dc, SlicePlane plane, Rect dst)
     {

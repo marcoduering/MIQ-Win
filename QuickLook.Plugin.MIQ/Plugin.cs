@@ -103,6 +103,27 @@ public sealed class Plugin : IViewer
                 // slices — instead of re-decoding the same slices in each of the
                 // former BuildSegmentationLut + SharedWindow + ExtractSlice×3 calls.
                 var (lut, window, initial) = volume.CenterInteractiveState(options);
+
+                // No LUT and no window on a scalar volume means IntensityWindow
+                // pooled the three center slices and found not one finite voxel —
+                // the file is entirely NaN/±Inf. Every slice would then be uniformly
+                // black (Finalize emits a zeroed buffer when the window is null) and
+                // window/level would be inert, which is indistinguishable from a
+                // genuinely empty volume or a broken preview. Say so instead. Not an
+                // error: the file is well-formed, it just holds nothing renderable.
+                if (window is null && lut is null && !volume.IsRgb)
+                {
+                    control.Dispatcher.BeginInvoke(() =>
+                    {
+                        if (cts.IsCancellationRequested) return;
+                        control.ShowMessage(
+                            $"{Path.GetFileName(path)}\n\n"
+                            + "No finite voxel values to display (the volume is entirely NaN or infinite).");
+                        context.IsBusy = false;
+                    });
+                    return;
+                }
+
                 var orientation = image.Header.OrientationFrame?.Label;
                 var metadata = settings.SelectMetadata(
                     new MiqMetadata(image.Header, fmt, orientation).AsDisplayLines());

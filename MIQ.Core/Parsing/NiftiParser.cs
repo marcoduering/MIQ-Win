@@ -73,8 +73,9 @@ public static class NiftiParser
         var pixdim = MiqBinaryReader.Float32Array(data, 76, count: 8, littleEndian);
         // float→double widening is exact, so the check below sees the stored value.
         var voxOffset = NarrowVoxOffset(MiqBinaryReader.Float32(data, 108, littleEndian));
-        var sclSlope = MiqBinaryReader.Float32(data, 112, littleEndian);
-        var sclInter = MiqBinaryReader.Float32(data, 116, littleEndian);
+        var (sclSlope, sclInter) = NormalizeScaling(
+            MiqBinaryReader.Float32(data, 112, littleEndian),
+            MiqBinaryReader.Float32(data, 116, littleEndian));
         var qformCode = MiqBinaryReader.Int16(data, 252, littleEndian);
         var sformCode = MiqBinaryReader.Int16(data, 254, littleEndian);
         var quaternB = MiqBinaryReader.Float32(data, 256, littleEndian);
@@ -125,8 +126,9 @@ public static class NiftiParser
         var pixdim = Array.ConvertAll(
             MiqBinaryReader.Float64Array(data, 104, count: 4, littleEndian), v => (float)v);
         var voxOffset = NarrowVoxOffset(MiqBinaryReader.Int64(data, 168, littleEndian));
-        var sclSlope = (float)MiqBinaryReader.Float64(data, 176, littleEndian);
-        var sclInter = (float)MiqBinaryReader.Float64(data, 184, littleEndian);
+        var (sclSlope, sclInter) = NormalizeScaling(
+            (float)MiqBinaryReader.Float64(data, 176, littleEndian),
+            (float)MiqBinaryReader.Float64(data, 184, littleEndian));
         var qformCode = MiqBinaryReader.Int32(data, 344, littleEndian);
         var sformCode = MiqBinaryReader.Int32(data, 348, littleEndian);
         var quaternB = (float)MiqBinaryReader.Float64(data, 352, littleEndian);
@@ -234,6 +236,30 @@ public static class NiftiParser
         if (value > int.MaxValue) throw MiqException.InvalidVoxOffset(value);
         return (int)value;
     }
+
+    /// Non-finite scl_slope/scl_inter mean "no scaling", which this format already
+    /// spells as slope 0 — so normalise to 0/0 and let the existing unscaled path
+    /// handle it.
+    ///
+    /// This is NOT corrupt-header hardening. nibabel uses NaN as its marker for
+    /// "scaling undefined": it resets both fields to NaN when it loads an image (to
+    /// record that the scaling was consumed by the read), that NaN lives in the
+    /// header struct it writes back out, and its own reader maps a non-finite slope
+    /// to "no scaling" on the way back in. A NaN slope is therefore an ordinary
+    /// thing to find in a file from the most widely used NIfTI toolchain, and every
+    /// reader is expected to render it normally.
+    ///
+    /// Without this the volume is destroyed rather than mis-scaled: MiqVolume.Voxel
+    /// gates on `slope != 0`, which is TRUE for NaN, so every voxel becomes
+    /// raw*NaN + inter = NaN. IntensityWindow then finds no finite value, returns a
+    /// null window, and the whole file renders as a black square with no error —
+    /// while the metadata panel reports "Scaling: x NaN + NaN".
+    ///
+    /// Both fields must be finite for the pair to be usable (a finite slope with a
+    /// NaN intercept still yields NaN for every voxel), so they are dropped
+    /// together. Finite pairs pass through untouched.
+    private static (float slope, float inter) NormalizeScaling(float slope, float inter) =>
+        MiqCompat.IsFinite(slope) && MiqCompat.IsFinite(inter) ? (slope, inter) : (0f, 0f);
 
     /// NIfTI-2 stores dim[] as int64. Truncating to int keeps only the low 32 bits,
     /// which turns an unrenderable size into a plausible one — 2^32+1 becomes 1 —
