@@ -13,10 +13,12 @@ namespace MIQ.Parsing;
 /// abs(rank) = storage order (0 = fastest-varying), sign = traversal direction.
 /// The sign feeds the <see cref="OrientationFrame"/> (which axis points which
 /// anatomical way), NOT the element strides — strides stay positive and the
-/// reversal is applied once, at slice time, via the frame.
+/// reversal is applied once, at slice time, via the frame. The rank permutes the
+/// three spatial axes: the volume is presented in memory order, not <c>dim:</c>
+/// order, so MIF reaches the renderer laid out like every other format here.
 ///
-/// Anatomy comes from <c>transform:</c> composed with that layout sign — never
-/// from the axis index; see <see cref="BuildOrientationFrame"/>.
+/// Anatomy comes from <c>transform:</c> composed with that layout — never from
+/// the axis index; see <see cref="BuildOrientationFrame"/>.
 /// </summary>
 public static class MifParser
 {
@@ -151,18 +153,35 @@ public static class MifParser
             payloadOffset = 0;
         }
 
-        var (elementStrides, baseElementIndex) = ComputeStrides(dim, layout);
+        var (rawStrides, baseElementIndex) = ComputeStrides(dim, layout);
+
+        // MIF is the one format here whose `dim:` order is NOT its storage order —
+        // MRtrix realigns on import and parks the real orientation in `layout:`. The
+        // three spatial axes are therefore presented in MEMORY order (fastest-varying
+        // first), which is what every other format already hands the renderer, and
+        // what `mrconvert x.mif x.nii.gz` writes: NIfTI has no stride indirection, so
+        // MRtrix bakes the layout into the affine and the array order. Presenting the
+        // `dim:` order instead would preview the same volume differently in the two
+        // containers and report an orientation no other tool (fsleyes, nibabel, FSL)
+        // agrees with. Non-spatial axes (volumes) keep their position — only 0/1/2
+        // permute, and only relative to each other, which is exactly what the NIfTI
+        // export preserves (it must put the volume axis last regardless).
+        var order = SpatialMemoryOrder(layout);
+        var storedDim     = PermuteSpatial(dim, order);
+        var storedVox     = PermuteSpatial(vox, order);
+        var elementStrides = PermuteSpatial(rawStrides, order);
+
         // vox may contain NaN for non-spatial dimensions (e.g. time axis); substitute 1.
         static float SafeVox(float v) => MiqCompat.IsFinite(v) && v > 0f ? v : 1f;
-        var sx = SafeVox(vox[0]);
-        var sy = SafeVox(vox[1]);
-        var sz = SafeVox(vox[2]);
-        var pixdim = new float[] { 1f, sx, sy, sz };
+        var pixdim = new float[]
+        {
+            1f, SafeVox(storedVox[0]), SafeVox(storedVox[1]), SafeVox(storedVox[2]),
+        };
 
-        var orientationFrame = BuildOrientationFrame(transformRows, layout);
+        var orientationFrame = BuildOrientationFrame(transformRows, layout, order);
 
         var dimensions = new int[4];
-        for (var i = 0; i < 4; i++) dimensions[i] = i < dim.Length ? dim[i] : 1;
+        for (var i = 0; i < 4; i++) dimensions[i] = i < storedDim.Length ? storedDim[i] : 1;
 
         var header = new MiqHeader
         {
@@ -251,25 +270,23 @@ public static class MifParser
     /// part is read; the translation column and the per-axis voxel size scale a
     /// whole column, which cannot change which component dominates it.
     ///
-    /// The layout then flips it: <see cref="ComputeStrides"/> walks every axis with
-    /// a POSITIVE stride, so a reversed axis is read memory-first — backwards along
-    /// the direction the transform gives — and its anatomy is the opposite letter.
-    /// The layout's axis ORDER is a pure memory permutation, consumed by
-    /// ComputeStrides alone: this frame is keyed by IMAGE axis, the same index
-    /// <see cref="MiqImage.VoxelElementIndex"/> and <c>dim:</c> use, so permuting it
-    /// here would mislabel the axes the renderer actually walks. (A NIfTI export of
-    /// the same volume is written in memory order, so its axcode is this label
-    /// permuted by that order — identical anatomy, different axis numbering.)
+    /// The layout then composes with it, in both of its halves. Direction: strides
+    /// are always positive (see <see cref="ComputeStrides"/>), so a reversed axis is
+    /// read memory-first — backwards along the direction the transform gives — and
+    /// its anatomy is the opposite letter. Order: the columns come out in
+    /// <paramref name="order"/>, the same memory order the dimensions and strides are
+    /// permuted into, so axis i of the frame is axis i of the volume the renderer
+    /// walks and the label is the one the NIfTI export reports.
     ///
     /// <c>transform:</c> is optional; absent, it is the identity, and the
-    /// composition reduces to the layout signs alone — a fallback, not a second
-    /// code path. Returns null ("orientation unknown", rendered as "?") for a
-    /// degenerate transform: a wrong-shaped, non-finite or zero column, or two
-    /// columns dominant on the same world axis. A bad transform does not fail the
-    /// parse — the voxels are still displayable, only their anatomy is unknown.
+    /// composition reduces to the layout alone — a fallback, not a second code path.
+    /// Returns null ("orientation unknown", rendered as "?") for a degenerate
+    /// transform: a wrong-shaped, non-finite or zero column, or two columns dominant
+    /// on the same world axis. A bad transform does not fail the parse — the voxels
+    /// are still displayable, only their anatomy is unknown.
     /// </summary>
     private static OrientationFrame? BuildOrientationFrame(
-        List<string> transformRows, LayoutComponent[] layout)
+        List<string> transformRows, LayoutComponent[] layout, int[] order)
     {
         var rows = new[]
         {
@@ -301,7 +318,30 @@ public static class MifParser
             for (var r = 0; r < 3; r++) rows[r][axis] = -rows[r][axis];
         }
 
-        return OrientationFrame.From(rows[0], rows[1], rows[2]);
+        return OrientationFrame.From(
+            PermuteSpatial(rows[0], order),
+            PermuteSpatial(rows[1], order),
+            PermuteSpatial(rows[2], order));
+    }
+
+    /// The three spatial axes sorted by storage rank, fastest-varying first — the
+    /// order MIF data actually sits in memory, and the axis order this parser
+    /// presents the volume in.
+    private static int[] SpatialMemoryOrder(LayoutComponent[] layout)
+    {
+        var order = new[] { 0, 1, 2 };
+        Array.Sort(order, (a, b) => layout[a].Order.CompareTo(layout[b].Order));
+        return order;
+    }
+
+    /// Reorders the first three entries by <paramref name="order"/>, leaving any
+    /// further (non-spatial) entries where they are. Callers pass arrays already
+    /// validated to hold at least the three spatial axes.
+    private static T[] PermuteSpatial<T>(T[] values, int[] order)
+    {
+        var result = (T[])values.Clone();
+        for (var i = 0; i < 3; i++) result[i] = values[order[i]];
+        return result;
     }
 
     // ── Stride computation (port of MIFAxisLayout.swift) ────────────────────
@@ -323,6 +363,9 @@ public static class MifParser
         // labelling it flipped — which shows up as an upside-down reoriented
         // view. Matches MIQCore's MIQImage ("strides are always positive — axis-
         // reversal info lives in the orientation frame"); no base offset needed.
+        //
+        // Indexed by IMAGE axis (`dim:` order), as `dim` is here; the caller then
+        // permutes strides and dimensions together into memory order.
         var strides = new int[n];
         var stride  = 1;
         foreach (var axis in sorted)

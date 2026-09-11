@@ -11,16 +11,17 @@ namespace MIQ.Tests;
 // reading `transform:`. That shortcut is right for anything mrconvert writes —
 // it normalises the transform on write and parks the real orientation in the
 // layout — and silently wrong, left/right included, for a file from
-// `mrtransform -replace`, which does not normalise.
+// `mrtransform -replace`, which does not normalise. `transform:` alone is not an
+// orientation code either: it is RAS for essentially every MRtrix-written file.
+// The orientation is the transform composed WITH the layout, in both of the
+// layout's halves — the sign flips an axis, the rank permutes the three.
 //
 // Ground truth is the NIfTI export: `mrconvert x.mif x.nii.gz`, then the axcode
 // nibabel/fsleyes/FSL read off the affine. NIfTI has no stride indirection, so
-// MRtrix has to bake the orientation into the affine. MRtrix preserves strides
-// through the conversion and NIfTI stores axes fastest-first, so the exported
-// array's axes are this volume's axes in MEMORY order — while MIQ's frame is
-// keyed by IMAGE axis (`dim:` order), the index its dimensions and strides use.
-// The two labels are therefore the same anatomy under the layout's permutation,
-// which is what ExportAxcode applies before comparing.
+// MRtrix has to bake the orientation into the affine and the array order, which
+// is why the export is the authority on both the letters and the axis order.
+// MifParser presents the spatial axes in that same memory order, so the labels
+// below ARE the export's axcodes, compared verbatim.
 public class MifOrientationTests
 {
     // ── Fixtures ────────────────────────────────────────────────────────────
@@ -48,7 +49,7 @@ public class MifOrientationTests
         return file;
     }
 
-    /// 60° rotation about z — the `mrtransform -replace` fixture. Columns:
+    /// 60° rotation about z — the `mrtransform -replace` case. Columns:
     /// 0 → (0.5, 0.866, 0) dominant +y = A; 1 → (-0.866, 0.5, 0) dominant −x = L;
     /// 2 → (0, 0, 1) = S.
     static readonly string[] Rot60Z =
@@ -65,37 +66,15 @@ public class MifOrientationTests
 
     static string Label(byte[] file) => MifParser.Parse(file).Header.OrientationFrame!.Label;
 
-    /// The orientation code the NIfTI export of this file reports: MIQ's
-    /// image-axis-keyed label permuted into memory order (axes sorted by
-    /// abs(layout), fastest first).
-    static string ExportAxcode(byte[] file, string layout)
-    {
-        var order = layout.Split(',')
-            .Take(3)
-            .Select(t => int.Parse(t.TrimStart('+', '-')))
-            .ToArray();
-        var frame = MifParser.Parse(file).Header.OrientationFrame!;
-        return string.Concat(Enumerable.Range(0, 3)
-            .OrderBy(axis => order[axis])
-            .Select(axis => frame.Axes[axis].Letter));
-    }
-
     // ── The defect ──────────────────────────────────────────────────────────
 
-    // `mrtransform in.mif out.mif -replace rot60.txt`. The NIfTI export of this
-    // volume reads RIA. Deriving anatomy from the axis index instead gives PIR —
-    // all three letters wrong, left/right among them.
+    // The header of a real `mrtransform in.mif out.mif -replace rot60.txt` file
+    // (211×240×256, `mrtrix_version: 3.0.4`). Its NIfTI export reads RIA.
+    // Deriving anatomy from the axis index instead gives PIR — all three letters
+    // wrong, left/right among them.
     [Fact]
-    public void ReplacedTransform_MatchesNiftiExport()
-    {
-        const string layout = "+2,-0,-1";
-        var file = MifFile(layout, Rot60Z);
-
-        Assert.Equal("RIA", ExportAxcode(file, layout));
-        // Same anatomy keyed by image axis: 0 → A (not reversed), 1 → L reversed
-        // to R, 2 → S reversed to I.
-        Assert.Equal("ARI", Label(file));
-    }
+    public void ReplacedTransform_MatchesNiftiExport() =>
+        Assert.Equal("RIA", Label(MifFile("+2,-0,-1", Rot60Z, new[] { 211, 240, 256 })));
 
     // ── Composition: the transform alone is not the orientation ─────────────
 
@@ -121,8 +100,10 @@ public class MifOrientationTests
     public void AbsentTransform_FallsBackToIdentity() =>
         Assert.Equal("LAS", Label(MifFile("-0,+1,+2")));
 
-    // A real mrconvert file (the layout and identity-ish transform of the perf
+    // A real mrconvert file (the layout and identity transform of the perf
     // corpus's 3_wmfod.mif, written with `-stride 0,0,0,1`): unchanged by the fix.
+    // Its volume axis is the fastest-varying one, which the spatial permutation
+    // must ignore — the three spatial axes are already in rank order.
     [Fact]
     public void MrconvertWrittenFile_IsUnchanged() =>
         Assert.Equal("LAS", Label(MifFile("-1,+2,+3,+0", Identity, new[] { 4, 4, 4, 2 })));
@@ -134,19 +115,41 @@ public class MifOrientationTests
         Assert.Equal("RAS", Label(MifFile(
             "+0,+1,+2", new[] { "0.866,-0.5,0,0", "0.5,0.866,0,0", "0,0,1,0" })));
 
-    // ── The layout's axis ORDER is a memory permutation, not anatomy ────────
+    // ── The layout's rank permutes the volume, not just the label ───────────
 
-    // It is consumed by the stride computation alone. The frame stays keyed by
-    // image axis, so it still labels the axes the renderer walks; the export
-    // axcode is that label permuted.
+    // Storage order, not `dim:` order, is what reaches the renderer: the label,
+    // the dimensions and the strides all permute together, so axis i of the frame
+    // is axis i of the volume being walked. A label permuted on its own would
+    // mislabel the axes and misplace every reoriented slice.
     [Fact]
-    public void LayoutOrder_PermutesTheExportNotTheFrame()
+    public void LayoutRank_PermutesLabelDimensionsAndStridesTogether()
     {
-        const string layout = "+1,+0,+2";
-        var file = MifFile(layout, Identity);
+        // Ranks 1,0,2 → memory order is axis 1, axis 0, axis 2.
+        var image = MifParser.Parse(MifFile("+1,+0,+2", Identity, new[] { 2, 3, 4 }));
 
-        Assert.Equal("RAS", Label(file));
-        Assert.Equal("ARS", ExportAxcode(file, layout));
+        Assert.Equal("ARS", image.Header.OrientationFrame!.Label);
+        Assert.Equal(new[] { 3, 2, 4, 1 }, image.Header.Dimensions);
+        // Fastest axis first: 1, then ×3, then ×3·2.
+        Assert.Equal(new[] { 1, 3, 6 }, image.ElementStrides);
+    }
+
+    // The permutation must not break the mapping from voxel to element: every
+    // voxel of the presented volume still lands on a distinct payload element,
+    // and the whole payload is covered.
+    [Fact]
+    public void PermutedVolume_StillAddressesEveryElementExactlyOnce()
+    {
+        var image = MifParser.Parse(MifFile("+2,-0,-1", Rot60Z, new[] { 2, 3, 4 }));
+        var (w, h, d) = (image.Header.Width, image.Header.Height, image.Header.Depth);
+        Assert.Equal(new[] { 3, 4, 2 }, new[] { w, h, d });
+
+        var seen = new HashSet<int>();
+        for (var z = 0; z < d; z++)
+            for (var y = 0; y < h; y++)
+                for (var x = 0; x < w; x++)
+                    Assert.True(seen.Add(image.VoxelElementIndex(x, y, z, 0)));
+
+        Assert.Equal(Enumerable.Range(0, w * h * d), seen.OrderBy(i => i));
     }
 
     // ── Degenerate transforms yield "unknown", never an invented frame ──────
