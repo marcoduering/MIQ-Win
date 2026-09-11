@@ -11,22 +11,33 @@ namespace MIQ.Parsing;
 /// binary voxel data at the byte offset given in the <c>file</c> field.
 /// The <c>layout</c> field assigns each axis a signed storage rank:
 /// abs(rank) = storage order (0 = fastest-varying), sign = traversal direction.
-/// MRtrix axis convention: axis 0 = L(−)/R(+), 1 = P(−)/A(+), 2 = I(−)/S(+).
 /// The sign feeds the <see cref="OrientationFrame"/> (which axis points which
 /// anatomical way), NOT the element strides — strides stay positive and the
 /// reversal is applied once, at slice time, via the frame.
+///
+/// Anatomy comes from <c>transform:</c> composed with that layout sign — never
+/// from the axis index; see <see cref="BuildOrientationFrame"/>.
 /// </summary>
 public static class MifParser
 {
     public static MiqImage Parse(byte[] data, string? formatLabel = null)
     {
-        var (fields, headerEndOffset) = ParseHeaderFields(data);
-        return BuildImage(data, fields, headerEndOffset, formatLabel);
+        var (fields, transformRows, headerEndOffset) = ParseHeaderFields(data);
+        return BuildImage(data, fields, transformRows, headerEndOffset, formatLabel);
     }
 
     // ── Header text parsing ──────────────────────────────────────────────────
 
-    private static (Dictionary<string, string> fields, int headerEndOffset) ParseHeaderFields(byte[] data)
+    /// <summary>
+    /// Splits the header into single-valued fields plus the <c>transform:</c> rows.
+    /// A MIF key may repeat, in which case the entries form a list — <c>transform:</c>
+    /// is written as three such lines, one per world axis, and is the only repeated
+    /// key this parser consumes (<c>dw_scheme</c>, <c>comments</c> and
+    /// <c>command_history</c> also repeat and are ignored). Everything else keeps the
+    /// last occurrence, as before.
+    /// </summary>
+    private static (Dictionary<string, string> fields, List<string> transformRows, int headerEndOffset)
+        ParseHeaderFields(byte[] data)
     {
         var endOffset = FindEndMarker(data);
         if (endOffset < 0)
@@ -39,6 +50,7 @@ public static class MifParser
             throw new MiqException("MIF header: missing 'mrtrix image' magic.");
 
         var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var transformRows = new List<string>();
         for (var i = 1; i < lines.Length; i++)
         {
             var line = lines[i].Trim();
@@ -47,11 +59,14 @@ public static class MifParser
             if (colon < 0) continue;
             var key   = line.Substring(0, colon).Trim();
             var value = line.Substring(colon + 1).Trim();
-            if (key.Length > 0)
+            if (key.Length == 0) continue;
+            if (string.Equals(key, "transform", StringComparison.OrdinalIgnoreCase))
+                transformRows.Add(value);
+            else
                 fields[key] = value;
         }
 
-        return (fields, endOffset);
+        return (fields, transformRows, endOffset);
     }
 
     // Find "END" on its own line followed by \n (or \r\n).
@@ -73,7 +88,8 @@ public static class MifParser
     // ── Image construction ───────────────────────────────────────────────────
 
     private static MiqImage BuildImage(
-        byte[] data, Dictionary<string, string> fields, int headerEndOffset, string? formatLabel)
+        byte[] data, Dictionary<string, string> fields, List<string> transformRows,
+        int headerEndOffset, string? formatLabel)
     {
         if (!fields.TryGetValue("dim", out var dimStr))
             throw new MiqException("MIF header: missing 'dim' field.");
@@ -143,15 +159,7 @@ public static class MifParser
         var sz = SafeVox(vox[2]);
         var pixdim = new float[] { 1f, sx, sy, sz };
 
-        // MRtrix axis convention: axis 0 = L(−)/R(+), 1 = P(−)/A(+), 2 = I(−)/S(+).
-        // Build column-direction vectors so OrientationFrame.From can determine anatomy.
-        var sign0 = layout[0].Reversed ? -1f : 1f;
-        var sign1 = layout[1].Reversed ? -1f : 1f;
-        var sign2 = layout[2].Reversed ? -1f : 1f;
-        var srowX = new[] { sign0 * sx, 0f, 0f, 0f };
-        var srowY = new[] { 0f, sign1 * sy, 0f, 0f };
-        var srowZ = new[] { 0f, 0f, sign2 * sz, 0f };
-        var orientationFrame = OrientationFrame.From(srowX, srowY, srowZ);
+        var orientationFrame = BuildOrientationFrame(transformRows, layout);
 
         var dimensions = new int[4];
         for (var i = 0; i < 4; i++) dimensions[i] = i < dim.Length ? dim[i] : 1;
@@ -225,6 +233,75 @@ public static class MifParser
             unpacked[i] = (byte)((data[payloadOffset + (i >> 3)] >> (7 - (i & 7))) & 1);
 
         return unpacked;
+    }
+
+    // ── Orientation ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Anatomical frame for the three spatial axes: the <c>transform:</c> composed
+    /// with the <c>layout:</c> directions. Anatomy is never inferred from the axis
+    /// index — that shortcut only holds for what <c>mrconvert</c> writes (it
+    /// normalises the transform on write, parking the real orientation in the
+    /// layout); a file from <c>mrtransform -replace</c>, which does not normalise,
+    /// is silently wrong under it, left/right included.
+    ///
+    /// The transform's COLUMN i is image axis i's direction in world (RAS) space —
+    /// the same shape as a NIfTI sform, so <see cref="OrientationFrame.From"/> does
+    /// the anatomy lookup and no new math is written here. Only the 3×3 rotation
+    /// part is read; the translation column and the per-axis voxel size scale a
+    /// whole column, which cannot change which component dominates it.
+    ///
+    /// The layout then flips it: <see cref="ComputeStrides"/> walks every axis with
+    /// a POSITIVE stride, so a reversed axis is read memory-first — backwards along
+    /// the direction the transform gives — and its anatomy is the opposite letter.
+    /// The layout's axis ORDER is a pure memory permutation, consumed by
+    /// ComputeStrides alone: this frame is keyed by IMAGE axis, the same index
+    /// <see cref="MiqImage.VoxelElementIndex"/> and <c>dim:</c> use, so permuting it
+    /// here would mislabel the axes the renderer actually walks. (A NIfTI export of
+    /// the same volume is written in memory order, so its axcode is this label
+    /// permuted by that order — identical anatomy, different axis numbering.)
+    ///
+    /// <c>transform:</c> is optional; absent, it is the identity, and the
+    /// composition reduces to the layout signs alone — a fallback, not a second
+    /// code path. Returns null ("orientation unknown", rendered as "?") for a
+    /// degenerate transform: a wrong-shaped, non-finite or zero column, or two
+    /// columns dominant on the same world axis. A bad transform does not fail the
+    /// parse — the voxels are still displayable, only their anatomy is unknown.
+    /// </summary>
+    private static OrientationFrame? BuildOrientationFrame(
+        List<string> transformRows, LayoutComponent[] layout)
+    {
+        var rows = new[]
+        {
+            new[] { 1f, 0f, 0f },
+            new[] { 0f, 1f, 0f },
+            new[] { 0f, 0f, 1f },
+        };
+
+        if (transformRows.Count > 0)
+        {
+            if (transformRows.Count != 3) return null;
+            for (var r = 0; r < 3; r++)
+            {
+                // Lenient parse: a malformed optional field costs the orientation,
+                // not the preview.
+                var values = TryParseFloatList(transformRows[r]);
+                if (values is null || values.Length < 3) return null;
+                for (var c = 0; c < 3; c++)
+                {
+                    if (!MiqCompat.IsFinite(values[c])) return null;
+                    rows[r][c] = values[c];
+                }
+            }
+        }
+
+        for (var axis = 0; axis < 3; axis++)
+        {
+            if (!layout[axis].Reversed) continue;
+            for (var r = 0; r < 3; r++) rows[r][axis] = -rows[r][axis];
+        }
+
+        return OrientationFrame.From(rows[0], rows[1], rows[2]);
     }
 
     // ── Stride computation (port of MIFAxisLayout.swift) ────────────────────
@@ -320,9 +397,12 @@ public static class MifParser
         return (datatype, le, false);
     }
 
+    private static string[] SplitList(string s) =>
+        s.Split(new[] { ',', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+
     private static int[] ParseIntList(string s)
     {
-        var parts = s.Split(new[] { ',', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        var parts = SplitList(s);
         var result = new int[parts.Length];
         for (var i = 0; i < parts.Length; i++)
         {
@@ -334,21 +414,39 @@ public static class MifParser
 
     private static float[] ParseFloatList(string s)
     {
-        var parts = s.Split(new[] { ',', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        var parts = SplitList(s);
         var result = new float[parts.Length];
         for (var i = 0; i < parts.Length; i++)
         {
-            var t = parts[i].Trim();
-            if (t.Equals("nan", StringComparison.OrdinalIgnoreCase)) { result[i] = float.NaN; continue; }
-            if (!float.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out result[i]))
-                throw new MiqException($"MIF: invalid float '{t}'.");
+            if (!TryParseFloat(parts[i], out result[i]))
+                throw new MiqException($"MIF: invalid float '{parts[i].Trim()}'.");
         }
         return result;
     }
 
+    /// Lenient sibling of <see cref="ParseFloatList"/>, for optional fields whose
+    /// malformation must not fail the parse: null instead of an exception.
+    private static float[]? TryParseFloatList(string s)
+    {
+        var parts = SplitList(s);
+        var result = new float[parts.Length];
+        for (var i = 0; i < parts.Length; i++)
+        {
+            if (!TryParseFloat(parts[i], out result[i])) return null;
+        }
+        return result;
+    }
+
+    private static bool TryParseFloat(string token, out float value)
+    {
+        var t = token.Trim();
+        if (t.Equals("nan", StringComparison.OrdinalIgnoreCase)) { value = float.NaN; return true; }
+        return float.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+    }
+
     private static LayoutComponent[] ParseLayout(string s)
     {
-        var parts = s.Split(new[] { ',', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        var parts = SplitList(s);
         var result = new LayoutComponent[parts.Length];
         for (var i = 0; i < parts.Length; i++)
         {
