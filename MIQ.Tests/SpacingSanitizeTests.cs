@@ -79,17 +79,20 @@ public class SpacingSanitizeTests
             Assert.True(slice.Image.Width > 1 && slice.Image.Height > 1);
     }
 
+    static string Sizes(IReadOnlyDictionary<SlicePlane, CenterSlice> slices) =>
+        string.Join(" ", new[] { SlicePlane.Coronal, SlicePlane.Sagittal, SlicePlane.Axial }
+            .Select(p => $"{p}={slices[p].Image.Width}x{slices[p].Image.Height}"));
+
     [Fact]
     public void SubMicroSpacing_KeepsFullResolution()
     {
-        // 256 voxels at 1e-9: the largest extent (2.56e-7) is under the old 1e-6
-        // reference floor, which rendered the slice at ~66 px instead of 256.
+        // 256×4×4 at 1e-9: the largest extent (2.56e-7) is below 1e-6. The slice
+        // extent (ResampleTarget) and maxPhysicalExtent (PrepareSlice) must treat
+        // spacing identically — any floor on only one side, or a 1e-6 floor on
+        // the reference extent, changes these sizes (shrinks or blows up planes).
         var tiny = Render(Nifti(1e-9f, 1e-9f, 1e-9f, w: 256, h: 4, d: 4));
         var unit = Render(Nifti(1, 1, 1, w: 256, h: 4, d: 4));
-        foreach (var plane in unit.Keys)
-            Assert.Equal(
-                (unit[plane].Image.Width, unit[plane].Image.Height),
-                (tiny[plane].Image.Width, tiny[plane].Image.Height));
+        Assert.Equal(Sizes(unit), Sizes(tiny));
     }
 
     [Theory]
