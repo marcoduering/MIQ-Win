@@ -6,9 +6,13 @@ namespace MIQ.Parsing;
 /// </summary>
 public static class NiftiParser
 {
-    public static MiqImage Parse(byte[] data, string? formatLabel = null)
+    /// <param name="compressed">Whether the file was gzipped. Only the format label
+    /// depends on it: <see cref="MiqFileKind"/>'s display name says "NIfTI-1", and
+    /// the header version is only known here while the compression is only known to
+    /// the caller.</param>
+    public static MiqImage Parse(byte[] data, bool compressed = false)
     {
-        var header = ParseHeader(data, formatLabel);
+        var header = ParseHeader(data, compressed);
 
         // ValidateSlicePlaneExtent (in ParseHeader) bounds any pairwise product of
         // width/height/depth, so this triple product can't wrap; subtracting
@@ -35,18 +39,25 @@ public static class NiftiParser
         };
     }
 
-    public static MiqHeader ParseHeader(byte[] data, string? formatLabel = null)
+    /// Every caller whose header ends up on a displayed image must pass
+    /// <paramref name="compressed"/> — the vol-0-first partial loads keep this
+    /// header as the image's, unlike macOS, where the probe only sizes the read.
+    public static MiqHeader ParseHeader(byte[] data, bool compressed = false)
     {
         if (data.Length < 4) throw MiqException.TruncatedData();
 
         var headerSizeLE = MiqBinaryReader.Int32(data, 0, littleEndian: true);
         var headerSizeBE = MiqBinaryReader.Int32(data, 0, littleEndian: false);
 
+        // NIfTI-1 keeps the file-kind label (null → "NIfTI-1" via DisplayName);
+        // NIfTI-2 shares those file kinds, so it names itself.
         MiqHeader header;
         if (headerSizeLE == 348 || headerSizeBE == 348)
-            header = ParseNifti1Header(data, littleEndian: headerSizeLE == 348, formatLabel);
+            header = ParseNifti1Header(data, littleEndian: headerSizeLE == 348,
+                compressed ? MiqFileKind.NiiGz.DisplayName() : null);
         else if (headerSizeLE == 540 || headerSizeBE == 540)
-            header = ParseNifti2Header(data, littleEndian: headerSizeLE == 540, formatLabel);
+            header = ParseNifti2Header(data, littleEndian: headerSizeLE == 540,
+                compressed ? "Compressed NIfTI-2" : "NIfTI-2");
         else
             throw MiqException.InvalidHeaderSize(headerSizeLE);
 

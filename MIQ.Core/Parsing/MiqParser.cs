@@ -64,7 +64,7 @@ public static class MiqParser
 
         return kind switch
         {
-            MiqFileKind.Nii or MiqFileKind.NiiGz     => NiftiParser.Parse(data, formatLabel),
+            MiqFileKind.Nii or MiqFileKind.NiiGz     => NiftiParser.Parse(data, kind.IsCompressed()),
             MiqFileKind.Mgh or MiqFileKind.Mgz       => MghParser.Parse(data, formatLabel),
             MiqFileKind.Mif or MiqFileKind.MifGz     => MifParser.Parse(data, formatLabel),
             MiqFileKind.Nrrd                         => NrrdParser.Parse(data, formatLabel),
@@ -123,7 +123,7 @@ public static class MiqParser
             return Parse(filePath);
 
         MiqHeader header;
-        try { header = NiftiParser.ParseHeader(probe, kind.DisplayName()); }
+        try { header = NiftiParser.ParseHeader(probe, compressed: true); }
         catch { return Parse(filePath); }
 
         if (header.Volumes <= 1)
@@ -182,7 +182,7 @@ public static class MiqParser
         var probe = new byte[1024];
         var probed = ReadFully(fs, probe, probe.Length);
         MiqHeader header;
-        try { header = NiftiParser.ParseHeader(Trim(probe, probed)); }
+        try { header = NiftiParser.ParseHeader(Trim(probe, probed), compressed: false); }
         catch { return Parse(filePath); }
 
         // A single volume is assumed to always fit; if a >2 GB file claims to be
