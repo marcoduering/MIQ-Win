@@ -622,9 +622,9 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
     private PreparedSlice PrepareSlice(
         SlicePlane plane, int? sliceIndex = null, int timepoint = 0)
     {
-        var dx = Math.Max(1e-6f, Math.Abs(Pixdim(1)));
-        var dy = Math.Max(1e-6f, Math.Abs(Pixdim(2)));
-        var dz = Math.Max(1e-6f, Math.Abs(Pixdim(3)));
+        var dx = SanitizedSpacing(Pixdim(1));
+        var dy = SanitizedSpacing(Pixdim(2));
+        var dz = SanitizedSpacing(Pixdim(3));
 
         var dims = new[] { Width, Height, Depth };
         var pixs = new[] { dx, dy, dz };
@@ -843,6 +843,18 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
     }
 
     private float Pixdim(int i) => i < H.Pixdim.Count ? H.Pixdim[i] : 1f;
+
+    /// Voxel spacing used for rendering: |value| when finite and positive, else 1.
+    /// A zero spacing is common in hand-written headers and mainstream viewers read
+    /// it as 1 (the old 1e-6 floor squashed that axis to a single pixel); a
+    /// non-finite one would poison the physical-extent arithmetic (it rendered a
+    /// 1×1 slice). Applied at render time only, so the metadata panel keeps the
+    /// header's raw values. Port of MIQCore's <c>sanitizedSpacing</c> (MIQ@d6dabd5).
+    internal static float SanitizedSpacing(float value)
+    {
+        var magnitude = Math.Abs(value);
+        return MiqCompat.IsFinite(magnitude) && magnitude > 0 ? magnitude : 1f;
+    }
 
     private float Voxel(int x, int y, int z, int t)
     {
