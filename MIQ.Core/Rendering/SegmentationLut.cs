@@ -13,17 +13,10 @@ namespace MIQ.Rendering;
 /// </summary>
 public sealed class SegmentationLut
 {
-    /// Upper bound on distinct labels (in the sampled center slices) for a volume
-    /// to be treated as a segmentation. NOT a discriminator between label maps and
-    /// intensity images — real label counts and intensity value counts overlap
-    /// completely (greyscale spans 42-127 distinct in testing; genuine label maps
-    /// span 11-136; a Destrieux parcellation at 131 has MORE distinct values than
-    /// a normalised T1 at 127), so no count threshold separates them in either
-    /// direction. That job belongs to piecewise-constancy (see
-    /// <see cref="MiqVolume.IsPiecewiseConstant"/>). This cap exists only as a
-    /// resource guard against pathological inputs and as a test seam (non-const +
-    /// internal so tests can lower it). Set well above dense atlases (Schaefer-1000,
-    /// HCP-MMP 360) so legitimate rich parcellations are never silently rejected.
+    /// Upper bound on distinct labels in the sampled center slices. A resource
+    /// guard and test seam only, NOT a discriminator: label and intensity value
+    /// counts overlap completely (see <see cref="MiqVolume.IsPiecewiseConstant"/>).
+    /// Well above dense atlases (Schaefer-1000, HCP-MMP 360).
     internal static int MaxLabels = 4096;
 
     private readonly bool _useFreeSurfer;
@@ -47,11 +40,8 @@ public sealed class SegmentationLut
         _rankedPalette = rankedPalette;
     }
 
-    /// Build a rank-based random palette: labels are sorted, hues spread evenly
-    /// at 360/n° intervals, with a coprime stride so value-adjacent labels map
-    /// to hue-distant slots. Colors are a pure function of the label set —
-    /// deterministic per file, but a label's color depends on its rank among
-    /// present labels, not its raw value.
+    /// Build a rank-based random palette (see <see cref="BuildRankedPalette"/>).
+    /// A label's colour depends on its rank among present labels, not its value.
     public static SegmentationLut Random(ISet<int> labels)
         => new SegmentationLut(BuildRankedPalette(labels));
 
@@ -75,16 +65,10 @@ public sealed class SegmentationLut
 
     public static bool IsFreeSurferLabel(int label) => FreeSurfer.ContainsKey(label);
 
-    // A FreeSurfer label that is BOTH distinctive (a naive sequential labelling
-    // never reaches it — left-hemisphere aseg only goes 2..31) AND always present
-    // in a whole-brain segmentation, so it is reliable proof of FreeSurfer:
-    //   41..54  right-hemisphere core structures (white matter / cortex / ventricle
-    //           / cerebellum / thalamus / caudate / putamen / pallidum / hippocampus
-    //           / amygdala) — anchored by 41 & 42, which are always segmented;
-    //   251..255 corpus callosum (always present);
-    //   1000+   cortical parcellation (always present in aparc).
-    // Optional labels (e.g. 77/80 hypointensities, 85 optic-chiasm, 58 accumbens)
-    // are deliberately excluded — they may be absent, so they can't be relied on.
+    // A FreeSurfer label that is both distinctive and always present in a
+    // whole-brain segmentation: 41..54 right-hemisphere core structures,
+    // 251..255 corpus callosum, 1000+ cortical parcellation. Optional structures
+    // (77/80 hypointensities, 85 optic chiasm, 58 accumbens) are excluded.
     private static bool IsFreeSurferSignature(int label) =>
         (label >= 41 && label <= 54)
         || (label >= 251 && label <= 255)
@@ -93,11 +77,8 @@ public sealed class SegmentationLut
     /// True when the sampled labels look like a FreeSurfer parcellation: at least
     /// a few non-background labels, a majority of which are in the canonical table,
     /// AND at least one is a FreeSurfer signature structure (see
-    /// <see cref="IsFreeSurferSignature"/>). The signature guard is what stops a
-    /// generic small-integer scheme — e.g. a 1=CSF / 2=GM / 3=WM tissue
-    /// segmentation, whose 2 and 3 coincide with FreeSurfer's white-matter and
-    /// cortex labels — from being mistaken for FreeSurfer and borrowing its
-    /// colours. Such files fall through to the random palette instead.
+    /// <see cref="IsFreeSurferSignature"/>). The signature guard stops e.g. a
+    /// 1=CSF / 2=GM / 3=WM tissue map from being mistaken for FreeSurfer.
     public static bool LooksLikeFreeSurfer(ICollection<int> labels)
     {
         var nonZero = 0;
@@ -114,12 +95,10 @@ public sealed class SegmentationLut
         return nonZero >= 3 && known * 2 >= nonZero && hasSignature;
     }
 
-    // Rank-based categorical palette: present labels sorted, hues spread evenly
-    // at 360/n° intervals. A coprime stride (near the golden ratio of n) maps
-    // sorted index → hue slot so value-adjacent labels are hue-distant while
-    // remaining a bijection (no collisions). Two-tier lightness alternation adds
-    // contrast once n is large enough that hue alone crowds. Pure function of
-    // the label set — deterministic per file, unknown labels fall back to RandomColor.
+    // Present labels sorted, hues evenly spaced at 360/n°. A coprime stride (near
+    // n × 0.618) maps sorted index → hue slot, so value-adjacent labels are
+    // hue-distant with no collisions. Alternating lightness adds contrast once
+    // hue alone crowds.
     private static Dictionary<int, (byte r, byte g, byte b)> BuildRankedPalette(ISet<int> labels)
     {
         var sorted = labels.Where(l => l != 0).OrderBy(l => l).ToArray();
@@ -147,10 +126,8 @@ public sealed class SegmentationLut
 
     private static int Gcd(int a, int b) { while (b != 0) (a, b) = (b, a % b); return a; }
 
-    // Deterministic per-label colour: hash the label to a hue (and small
-    // saturation/value jitter) so adjacent labels separate visually, the same
-    // label is identical in every plane/slice, and no pre-scan of the volume is
-    // needed. Knuth multiplicative hash spreads sequential ids well.
+    // Fallback for labels outside the built palette: Knuth hash of the label → hue
+    // with small saturation/value jitter.
     private static (byte r, byte g, byte b) RandomColor(int label)
     {
         unchecked
@@ -187,14 +164,11 @@ public sealed class SegmentationLut
 
     private static byte Byte(float unit) => (byte)MiqCompat.Clamp(MiqCompat.RoundToInt(unit * 255f), 0, 255);
 
-    // --- Canonical FreeSurfer colours (subset: aseg + Desikan aparc) ----------
-    // Values from FreeSurferColorLUT.txt. Right-hemisphere cortical labels
-    // (2000+) share their left-hemisphere colour, so the cortical palette is
-    // stored once and applied to both 1000+ and 2000+ in the static ctor.
+    // --- Canonical FreeSurfer colours (curated subset) -------------------------
+    // Values from FreeSurferColorLUT.txt. Left and right hemisphere share a colour.
 
     // Desikan-Killiany cortical colours, indexed by (label % 1000), 0..35.
-    // Declared before FreeSurfer (below) because its initializer reads this —
-    // static fields initialize in textual order, so the order matters.
+    // Must be declared before FreeSurfer: static fields initialize in textual order.
     private static readonly (byte r, byte g, byte b)[] Cortical =
     {
         (25, 5, 25),     // 0  unknown
@@ -236,8 +210,6 @@ public sealed class SegmentationLut
     };
 
     // Destrieux (aparc.a2009s) cortical colours, indexed by (label % 100), 0..75.
-    // Values from FreeSurferColorLUT.txt (ctx_lh_*/ctx_rh_* 11100-11175 /
-    // 12100-12175; lh and rh share a colour, same convention as Cortical above).
     private static readonly (byte r, byte g, byte b)[] Destrieux =
     {
         (0, 0, 0),       // 00 Unknown
@@ -386,12 +358,9 @@ public sealed class SegmentationLut
             d[12100 + i] = Destrieux[i];
         }
 
-        // wmparc gyral WM labels: lh = 3000+i, rh = 4000+i, indexed the same as
-        // Cortical (including index 0, wm-lh/rh-unknown). FreeSurferColorLUT.txt
-        // defines these as the exact (255-r, 255-g, 255-b) inverse of the matching
-        // Desikan cortical colour — verified against the published table for
-        // every one of the 36 structures, index 0 included — so they're derived
-        // here rather than duplicated as a second hand-copied 70-entry table.
+        // wmparc gyral WM labels: lh = 3000+i, rh = 4000+i. FreeSurferColorLUT.txt
+        // defines each as the exact RGB inverse of the matching Desikan colour
+        // (verified for all 36 entries), so they're derived rather than copied.
         for (var i = 0; i < Cortical.Length; i++)
         {
             var (r, g, b) = Cortical[i];

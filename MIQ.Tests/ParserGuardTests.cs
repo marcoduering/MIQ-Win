@@ -13,11 +13,6 @@ namespace MIQ.Tests;
 // guard that becomes too strict fails silently, because the valid file it starts
 // turning away was never in the corpus. So each guard gets both halves: the input
 // it exists to reject, and a neighbouring input it must still accept.
-//
-// Deliberately not a mutation fuzzer. Plugin.cs wraps the whole cold path in a
-// blanket catch, so "never crashes the host" is guaranteed by the caller; what
-// needs pinning is which inputs are refused and which are not. Fixtures are
-// synthetic byte arrays — no corpus, nothing machine-specific.
 public class ParserGuardTests
 {
     // ── NIfTI-1 ─────────────────────────────────────────────────────────────
@@ -103,11 +98,9 @@ public class ParserGuardTests
         Assert.Throws<MiqException>(() =>
             NiftiParser.Parse(Nifti1File(Nifti1Header(), OneVolume - 1)));
 
-    // vox_offset is a float32 here. Before the guard, a bare (int) cast of an
-    // out-of-range value yielded int.MinValue (measured on net8/x64 — it does not
-    // saturate), which Math.Max floored back to 352: the file parsed and rendered
-    // garbage from the wrong offset rather than reporting anything. These two are
-    // the tests that caught that — both fail if NarrowVoxOffset is reverted.
+    // vox_offset is a float32 here. A bare (int) cast of an out-of-range value
+    // yields int.MinValue, which would be floored back to 352 and render garbage.
+    // Both fail if NarrowVoxOffset is reverted.
     [Fact]
     public void Nifti1_VoxOffsetPastIntRange_Throws() =>
         Assert.Throws<MiqException>(() =>
@@ -265,10 +258,8 @@ public class ParserGuardTests
 
     [Fact]
     public void Mgh_DimensionsThatWouldOverflowTheSizeMath_ThrowCleanly() =>
-        // Upstream hit a hard trap here: `offset + payloadBytes` overflowed for a
-        // dims product near long.MaxValue, crashing instead of reporting. The guards
-        // are in subtraction form and the extent checks run first, so this must be
-        // an ordinary MiqException — the assertion is "reports", not "which one".
+        // A dims product near long.MaxValue must be reported as a MiqException, not
+        // overflow (upstream trapped here). Which exception doesn't matter.
         Assert.Throws<MiqException>(() =>
             MghParser.Parse(MghFile(w: 3577, h: 42799, d: 92737, nframes: 649657, payloadBytes: 0)));
 

@@ -6,22 +6,14 @@ namespace MIQ.Tests;
 
 // MIF anatomical orientation: `transform:` composed with `layout:`.
 //
-// The defect these pin: deriving the letters from the axis INDEX (axis 0 = R/L,
-// 1 = A/P, 2 = S/I, negated when the layout entry is negative) without ever
-// reading `transform:`. That shortcut is right for anything mrconvert writes —
-// it normalises the transform on write and parks the real orientation in the
-// layout — and silently wrong, left/right included, for a file from
-// `mrtransform -replace`, which does not normalise. `transform:` alone is not an
-// orientation code either: it is RAS for essentially every MRtrix-written file.
-// The orientation is the transform composed WITH the layout, in both of the
-// layout's halves — the sign flips an axis, the rank permutes the three.
+// Pins that anatomy is NOT derived from the axis index (right for mrconvert
+// output, wrong for `mrtransform -replace`), and that neither the transform nor
+// the layout alone is the orientation: the layout's sign flips an axis, its rank
+// permutes the three.
 //
-// Ground truth is the NIfTI export: `mrconvert x.mif x.nii.gz`, then the axcode
-// nibabel/fsleyes/FSL read off the affine. NIfTI has no stride indirection, so
-// MRtrix has to bake the orientation into the affine and the array order, which
-// is why the export is the authority on both the letters and the axis order.
-// MifParser presents the spatial axes in that same memory order, so the labels
-// below ARE the export's axcodes, compared verbatim.
+// Ground truth is the NIfTI export (`mrconvert x.mif x.nii.gz`, axcode read off
+// the affine), which bakes the layout into both letters and axis order. The
+// labels below are those axcodes, compared verbatim.
 public class MifOrientationTests
 {
     // ── Fixtures ────────────────────────────────────────────────────────────
@@ -94,15 +86,13 @@ public class MifOrientationTests
     public void LasTransformStoredReversed_IsRas() =>
         Assert.Equal("RAS", Label(MifFile("-0,+1,+2", LasTransform)));
 
-    // The field is optional: absent means an identity affine, which composed with
-    // the layout reproduces the pre-fix behaviour. A fallback, not a code path.
+    // The field is optional: absent means an identity affine.
     [Fact]
     public void AbsentTransform_FallsBackToIdentity() =>
         Assert.Equal("LAS", Label(MifFile("-0,+1,+2")));
 
     // A real mrconvert file (the layout and identity transform of the perf
-    // corpus's 3_wmfod.mif, written with `-stride 0,0,0,1`): unchanged by the fix.
-    // Its volume axis is the fastest-varying one, which the spatial permutation
+    // corpus's 3_wmfod.mif, written with `-stride 0,0,0,1`). Its volume axis is the fastest-varying one, which the spatial permutation
     // must ignore — the three spatial axes are already in rank order.
     [Fact]
     public void MrconvertWrittenFile_IsUnchanged() =>

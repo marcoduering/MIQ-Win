@@ -11,14 +11,8 @@ namespace MIQ.Parsing;
 /// binary voxel data at the byte offset given in the <c>file</c> field.
 /// The <c>layout</c> field assigns each axis a signed storage rank:
 /// abs(rank) = storage order (0 = fastest-varying), sign = traversal direction.
-/// The sign feeds the <see cref="OrientationFrame"/> (which axis points which
-/// anatomical way), NOT the element strides — strides stay positive and the
-/// reversal is applied once, at slice time, via the frame. The rank permutes the
-/// three spatial axes: the volume is presented in memory order, not <c>dim:</c>
-/// order, so MIF reaches the renderer laid out like every other format here.
-///
-/// Anatomy comes from <c>transform:</c> composed with that layout — never from
-/// the axis index; see <see cref="BuildOrientationFrame"/>.
+/// The sign feeds the <see cref="OrientationFrame"/>, not the strides; the rank
+/// permutes the spatial axes into memory order. See <see cref="BuildOrientationFrame"/>.
 /// </summary>
 public static class MifParser
 {
@@ -31,12 +25,9 @@ public static class MifParser
     // ── Header text parsing ──────────────────────────────────────────────────
 
     /// <summary>
-    /// Splits the header into single-valued fields plus the <c>transform:</c> rows.
-    /// A MIF key may repeat, in which case the entries form a list — <c>transform:</c>
-    /// is written as three such lines, one per world axis, and is the only repeated
-    /// key this parser consumes (<c>dw_scheme</c>, <c>comments</c> and
-    /// <c>command_history</c> also repeat and are ignored). Everything else keeps the
-    /// last occurrence, as before.
+    /// Splits the header into single-valued fields (last occurrence wins) plus the
+    /// <c>transform:</c> rows — written as three repeated lines, and the only
+    /// repeated key this parser consumes.
     /// </summary>
     private static (Dictionary<string, string> fields, List<string> transformRows, int headerEndOffset)
         ParseHeaderFields(byte[] data)
@@ -117,8 +108,7 @@ public static class MifParser
             throw new MiqException("MIF header: missing 'datatype' field.");
         var (datatype, littleEndian, isBit) = ParseDatatype(dtStr);
 
-        // dim is validated positive and ≥3 entries above. MRtrix axes 0/1/2 are
-        // the spatial ones, so they are the trio that forms the slice planes.
+        // Axes 0/1/2 are spatial and form the slice planes.
         MiqParser.ValidateDimensionExtent(dim, datatype.BytesPerVoxel());
         MiqParser.ValidateSlicePlaneExtent(dim[0], dim[1], dim[2]);
 
@@ -126,27 +116,21 @@ public static class MifParser
             throw new MiqException("MIF header: missing 'file' field.");
         var payloadOffset = ParseFileSpec(fileStr, headerEndOffset);
 
-        // Multiplies over EVERY declared axis, not just the first four — a 5-D MIF
-        // stores all of them, so narrowing this to W·H·D·T would under-require.
-        // ValidateDimensionExtent bounds the product; comparing against
-        // data.Length - payloadOffset keeps the comparison itself overflow-free
-        // (and still rejects a payloadOffset past the end, which goes negative).
+        // Over EVERY declared axis (a 5-D MIF stores all of them). The product is
+        // bounded by ValidateDimensionExtent; subtracting on the left keeps the
+        // comparison overflow-free and rejects an offset past the end.
         long totalElements = 1;
         foreach (var d in dim) totalElements *= d;
-        // Bit packs 8 voxels per byte with no per-row or per-slice alignment, so the
-        // payload is ceil(n/8) bytes -- NOT n * BytesPerVoxel(), which reports the
-        // post-unpack width of 1. The final byte may hold up to 7 padding bits.
+        // Bit packs 8 voxels per byte with no alignment: ceil(n/8) bytes, NOT
+        // n * BytesPerVoxel() (which reports the post-unpack width of 1).
         var payloadBytes = isBit
             ? (totalElements + 7) / 8
             : totalElements * datatype.BytesPerVoxel();
         if (data.Length - (long)payloadOffset < payloadBytes)
             throw MiqException.TruncatedData();
 
-        // Expand Bit to one byte per voxel HERE, at the parse boundary, so everything
-        // downstream sees an ordinary contiguous uint8 payload: the strides below index
-        // ELEMENTS, and unpacking bit i to byte i preserves that indexing exactly, for
-        // any layout. Costs 8x the payload in memory (a mask is small) and buys an
-        // untouched renderer -- see ParseDatatype for why no sub-byte MiqDatatype.
+        // Unpack Bit to one byte per voxel here, so downstream sees plain uint8.
+        // Strides index elements, so bit i → byte i preserves indexing for any layout.
         if (isBit)
         {
             data = UnpackBits(data, payloadOffset, totalElements);
@@ -155,17 +139,11 @@ public static class MifParser
 
         var (rawStrides, baseElementIndex) = ComputeStrides(dim, layout);
 
-        // MIF is the one format here whose `dim:` order is NOT its storage order —
-        // MRtrix realigns on import and parks the real orientation in `layout:`. The
-        // three spatial axes are therefore presented in MEMORY order (fastest-varying
-        // first), which is what every other format already hands the renderer, and
-        // what `mrconvert x.mif x.nii.gz` writes: NIfTI has no stride indirection, so
-        // MRtrix bakes the layout into the affine and the array order. Presenting the
-        // `dim:` order instead would preview the same volume differently in the two
-        // containers and report an orientation no other tool (fsleyes, nibabel, FSL)
-        // agrees with. Non-spatial axes (volumes) keep their position — only 0/1/2
-        // permute, and only relative to each other, which is exactly what the NIfTI
-        // export preserves (it must put the volume axis last regardless).
+        // MIF's `dim:` order is not its storage order. Present the three spatial axes
+        // in MEMORY order (fastest first), like every other format — and like
+        // `mrconvert x.mif x.nii.gz`, which bakes the layout into the NIfTI array
+        // order. Using `dim:` order disagrees with fsleyes/nibabel/FSL. Non-spatial
+        // axes stay in place.
         var order = SpatialMemoryOrder(layout);
         var storedDim     = PermuteSpatial(dim, order);
         var storedVox     = PermuteSpatial(vox, order);
@@ -257,33 +235,18 @@ public static class MifParser
     // ── Orientation ──────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Anatomical frame for the three spatial axes: the <c>transform:</c> composed
-    /// with the <c>layout:</c> directions. Anatomy is never inferred from the axis
-    /// index — that shortcut only holds for what <c>mrconvert</c> writes (it
-    /// normalises the transform on write, parking the real orientation in the
-    /// layout); a file from <c>mrtransform -replace</c>, which does not normalise,
-    /// is silently wrong under it, left/right included.
+    /// Anatomical frame for the three spatial axes: <c>transform:</c> composed with
+    /// <c>layout:</c>. Never inferred from the axis index — that only holds for what
+    /// <c>mrconvert</c> writes, not e.g. <c>mrtransform -replace</c>.
     ///
-    /// The transform's COLUMN i is image axis i's direction in world (RAS) space —
-    /// the same shape as a NIfTI sform, so <see cref="OrientationFrame.From"/> does
-    /// the anatomy lookup and no new math is written here. Only the 3×3 rotation
-    /// part is read; the translation column and the per-axis voxel size scale a
-    /// whole column, which cannot change which component dominates it.
+    /// Transform column i is image axis i's world (RAS) direction, like a NIfTI
+    /// sform, so <see cref="OrientationFrame.From"/> does the lookup. Only the 3×3
+    /// rotation is read. The layout composes in both halves: a reversed axis negates
+    /// its column (strides are always positive), and columns are permuted into the
+    /// same memory <paramref name="order"/> as dimensions and strides.
     ///
-    /// The layout then composes with it, in both of its halves. Direction: strides
-    /// are always positive (see <see cref="ComputeStrides"/>), so a reversed axis is
-    /// read memory-first — backwards along the direction the transform gives — and
-    /// its anatomy is the opposite letter. Order: the columns come out in
-    /// <paramref name="order"/>, the same memory order the dimensions and strides are
-    /// permuted into, so axis i of the frame is axis i of the volume the renderer
-    /// walks and the label is the one the NIfTI export reports.
-    ///
-    /// <c>transform:</c> is optional; absent, it is the identity, and the
-    /// composition reduces to the layout alone — a fallback, not a second code path.
-    /// Returns null ("orientation unknown", rendered as "?") for a degenerate
-    /// transform: a wrong-shaped, non-finite or zero column, or two columns dominant
-    /// on the same world axis. A bad transform does not fail the parse — the voxels
-    /// are still displayable, only their anatomy is unknown.
+    /// Absent <c>transform:</c> means identity. A degenerate transform yields null
+    /// (orientation unknown) rather than failing the parse.
     /// </summary>
     private static OrientationFrame? BuildOrientationFrame(
         List<string> transformRows, LayoutComponent[] layout, int[] order)
@@ -324,9 +287,7 @@ public static class MifParser
             PermuteSpatial(rows[2], order));
     }
 
-    /// The three spatial axes sorted by storage rank, fastest-varying first — the
-    /// order MIF data actually sits in memory, and the axis order this parser
-    /// presents the volume in.
+    /// The three spatial axes sorted by storage rank, fastest-varying first.
     private static int[] SpatialMemoryOrder(LayoutComponent[] layout)
     {
         var order = new[] { 0, 1, 2 };
@@ -355,17 +316,11 @@ public static class MifParser
         for (var i = 0; i < n; i++) sorted[i] = i;
         Array.Sort(sorted, (a, b) => layout[a].Order.CompareTo(layout[b].Order));
 
-        // Strides are ALWAYS POSITIVE: they map a canonical voxel index to its
-        // memory element, with no direction flip. The axis-reversal carried by
-        // the layout sign lives solely in the OrientationFrame (built above from
-        // the signed direction vectors). Folding the sign into the strides too
-        // would apply the reversal twice — reading the axis flipped *and*
-        // labelling it flipped — which shows up as an upside-down reoriented
-        // view. Matches MIQCore's MIQImage ("strides are always positive — axis-
-        // reversal info lives in the orientation frame"); no base offset needed.
+        // Strides are ALWAYS POSITIVE. The layout sign lives only in the
+        // OrientationFrame; folding it in here too would apply the reversal twice
+        // (an upside-down reoriented view). Matches MIQCore's MIQImage.
         //
-        // Indexed by IMAGE axis (`dim:` order), as `dim` is here; the caller then
-        // permutes strides and dimensions together into memory order.
+        // Indexed by `dim:` order; the caller permutes into memory order.
         var strides = new int[n];
         var stride  = 1;
         foreach (var axis in sorted)
@@ -397,12 +352,10 @@ public static class MifParser
         return offset;
     }
 
-    /// Returns the datatype the RENDERER will see, which is not always the one the
-    /// header names: MRtrix `Bit` is reported as <see cref="MiqDatatype.Uint8"/> with
-    /// <c>isBit</c> set, and <see cref="BuildImage"/> unpacks the payload to match.
-    /// MiqDatatype deliberately gains no sub-byte member -- every consumer of
-    /// BytesPerVoxel() assumes an integral width, including both hot decode loops and
-    /// ScanVolume0, so the widening happens here at the parse boundary instead.
+    /// Returns the datatype the renderer will see: MRtrix `Bit` becomes
+    /// <see cref="MiqDatatype.Uint8"/> with <c>isBit</c> set (unpacked in
+    /// <see cref="BuildImage"/>). No sub-byte MiqDatatype, because every
+    /// BytesPerVoxel() consumer assumes an integral width.
     private static (MiqDatatype datatype, bool littleEndian, bool isBit) ParseDatatype(string s)
     {
         s = s.Trim();
@@ -419,8 +372,7 @@ public static class MifParser
             s  = s.Substring(0, s.Length - 2);
         }
 
-        // Bit carries no endianness (MRtrix writes a bare "Bit"), and the LE/BE strip
-        // above cannot have consumed any of it, so this sees the header spelling as-is.
+        // Bit has no endianness suffix.
         if (string.Equals(s, "bit", StringComparison.OrdinalIgnoreCase))
             return (MiqDatatype.Uint8, le, true);
 

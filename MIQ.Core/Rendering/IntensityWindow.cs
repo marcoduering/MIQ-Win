@@ -36,11 +36,20 @@ public static class IntensityWindow
         return new Bounds(windowLow, windowHigh);
     }
 
+    // Divisor for Apply. No absolute floor: float data can span far less than
+    // 1e-6 (SI-unit ADC maps ~1e-9). A degenerate window (High <= Low) gives a
+    // zero numerator, so 1 just keeps the division finite.
+    private static float Range(Bounds bounds)
+    {
+        var width = bounds.High - bounds.Low;
+        return width > 0 ? width : 1f;
+    }
+
     /// Applies precomputed bounds, producing 8-bit grayscale. Specialised overload
     /// for float[] to avoid per-element interface dispatch on the hot path.
     public static byte[] Apply(float[] values, Bounds bounds)
     {
-        var range = Math.Max(bounds.High - bounds.Low, 1e-6f);
+        var range = Range(bounds);
         var outp = new byte[values.Length];
         for (var i = 0; i < values.Length; i++)
         {
@@ -56,7 +65,7 @@ public static class IntensityWindow
     /// Applies precomputed bounds, producing 8-bit grayscale.
     public static byte[] Apply(IReadOnlyList<float> values, Bounds bounds)
     {
-        var range = Math.Max(bounds.High - bounds.Low, 1e-6f);
+        var range = Range(bounds);
         var outp = new byte[values.Count];
         for (var i = 0; i < values.Count; i++)
         {

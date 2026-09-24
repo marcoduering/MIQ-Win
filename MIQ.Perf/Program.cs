@@ -7,11 +7,10 @@ using MIQ.Parsing;
 using MIQ.Rendering;
 using MIQ.Perf;
 
-// Build with -p:DefineConstants=NEWPATH against a tree that has
-// MiqVolume.CenterInteractiveState (i.e. P1-A applied). Without it, the harness
-// uses only the legacy primitive sequence (BuildSegmentationLut + SharedWindow +
-// ExtractSlice×3) and so compiles against pre-P1-A `main` — which is how the
-// main-baseline golden is captured. See docs/performance-plan.md.
+// -p:DefineConstants=NEWPATH times MiqVolume.CenterInteractiveState and diffs it
+// against the primitive sequence (BuildSegmentationLut + SharedWindow +
+// ExtractSlice×3). Without it only the primitive sequence is used, which
+// compiles on older trees too — handy for capturing golden there.
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const int N_ITERS = 3;   // measured iterations per quick stage (after 1 warm-up)
@@ -26,7 +25,7 @@ var goldenModes = new (string name, MiqRenderingOptions opts)[]
     ("auto", new MiqRenderingOptions(Segmentation: MiqSegmentationColoring.Auto)),
 };
 
-// Perf timing uses the plugin's default (Off).
+// Perf timing uses the MiqRenderingOptions default (segmentation Off).
 var perfOpts = new MiqRenderingOptions();
 
 var jsonOpts = new JsonSerializerOptions
@@ -153,8 +152,8 @@ foreach (var filePath in testFiles)
         var vol = new MiqVolume(image, perfOpts.Orientation);
 
         // ── Stage 2: first-preview work (Off mode) ─────────────────────────
-        // NEWPATH times CenterInteractiveState (the post-P1-A plugin path); else
-        // the legacy BuildSegmentationLut + SharedWindow + ExtractSlice×3 sequence.
+        // NEWPATH times CenterInteractiveState (the plugin's path); else the
+        // primitive sequence.
         SegmentationLut? lut = null;
         IntensityWindow.Bounds? window = null;
         var s2 = MeasureQuick(() =>
@@ -170,8 +169,7 @@ foreach (var filePath in testFiles)
         stages["centerState"] = s2;
         PrintStage("2  CenterState", s2, baselineFile?.Stages.GetValueOrDefault("centerState"), threshold);
 
-        // Time-to-first-preview = ParsePartial + first-preview work. Stored under a
-        // stable key so it stays comparable across the P1-A harness change.
+        // Time-to-first-preview = ParsePartial + first-preview work.
         var ttp = new StageMetric(s1.MinMs + s2.MinMs, s1.MinMs + s2.MinMs, s1.AllocKb + s2.AllocKb);
         stages["timeToFirstPreview"] = ttp;
         Console.WriteLine("   " + new string('─', 71));
@@ -205,15 +203,15 @@ foreach (var filePath in testFiles)
             {
                 var key = $"{name}|{modeName}";
 
-                // Golden is ALWAYS the legacy primitive-sequence output — it exists on
-                // both main and P1-A, so golden.json is comparable across the change.
+                // Golden is ALWAYS the primitive-sequence output, so it is comparable
+                // across trees with and without CenterInteractiveState.
                 var legacy = LegacyState(vol, modeOpts);
                 var legacyGolden = ComputeGolden(legacy.Window, legacy.Lut, legacy.Slices);
                 goldenNew[key] = legacyGolden;
 
 #if NEWPATH
-                // Differential: the new single-decode path must equal the legacy
-                // sequence it replaces, in every mode, this run.
+                // Differential: the single-decode path must equal the primitive
+                // sequence, in every mode.
                 var st = vol.CenterInteractiveState(modeOpts);
                 var newGolden = ComputeGolden(st.Window, st.Lut, st.Slices);
                 var diff = CompareGolden(legacyGolden, newGolden);
@@ -293,8 +291,7 @@ if (verifyMode && anyVerifyFail)
 
 // ── Local functions ──────────────────────────────────────────────────────────
 
-// Legacy primitive sequence — exactly what Plugin.View did before P1-A. Exists on
-// both main and P1-A, so it is the stable reference for golden capture.
+// Primitive sequence: the stable reference for golden capture.
 static LegacyResult LegacyState(MiqVolume vol, MiqRenderingOptions options)
 {
     var lut = vol.BuildSegmentationLut(options);

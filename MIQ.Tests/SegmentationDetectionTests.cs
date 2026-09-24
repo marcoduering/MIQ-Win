@@ -5,11 +5,8 @@ using Xunit;
 namespace MIQ.Tests;
 
 // Synthetic coverage for the piecewise-constancy gate (MiqVolume.IsPiecewiseConstant)
-// and the raised MaxLabels cap. No real FreeSurfer corpus is available in this
-// environment, so these fixtures build minimal in-memory MiqImage/MiqHeader
-// instances directly rather than going through a file parser. Block-based label
-// fixtures (not per-voxel cycling) so the label set stays piecewise-constant, as
-// called for by MIQ's synthetic-fixture guidance for this detector.
+// and the MaxLabels cap, using in-memory MiqImage/MiqHeader fixtures. Labels are
+// assigned by contiguous block (not per-voxel cycling), or the gate rejects them.
 public class SegmentationDetectionTests
 {
     static MiqVolume MakeVolume(int w, int h, int d, Func<int, int, int, int> valueAt)
@@ -63,9 +60,8 @@ public class SegmentationDetectionTests
     }
 
     // Every voxel a different small integer value with no spatial constancy —
-    // the false-positive shape from the bug report (a normalised anatomical
-    // re-quantized to a small integer range). Must NOT be coloured, even though
-    // the distinct-value count (20) is far under both the old and new caps.
+    // the false-positive shape (a normalised anatomical re-quantized to a small
+    // integer range). Must NOT be coloured, despite only 20 distinct values.
     [Fact]
     public void NoisyLowCardinalityIntensity_IsNotDetectedAsLabelVolume()
     {
@@ -122,10 +118,8 @@ public class SegmentationDetectionTests
         Assert.True(lut!.IsMonochromeWhite);
     }
 
-    // A dense parcellation (>160 distinct sampled labels, well under the new
-    // 4096 cap) must still be detected — proves the count cap was demoted from
-    // a discriminator to a resource guard. Block size 8 keeps the pooled
-    // boundary-crossing ratio in the same range as real segmentations (~0.1-0.15).
+    // A dense parcellation (>160 distinct sampled labels) must still be detected.
+    // Block size 8 keeps the boundary-crossing ratio realistic (~0.1-0.15).
     [Fact]
     public void DenseParcellation_AboveOldCapBelowNewCap_IsDetectedAsLabelVolume()
     {
@@ -167,8 +161,7 @@ public class SegmentationDetectionTests
 
     // Port of MIQ's segmentationWmparcGyralWhiteMatterColorIsCanonical: wm-lh/rh
     // -unknown (3000/4000, index 0 of the inversion loop) and the two leftover
-    // "not assigned to a gyral parcel" labels (5001/5002) must be recognized too
-    // — these were the specific entries missing from the first port pass.
+    // "not assigned to a gyral parcel" labels (5001/5002) must be recognized too.
     [Fact]
     public void WmParc_UnknownAndUnsegmentedLabelsAreRecognized()
     {

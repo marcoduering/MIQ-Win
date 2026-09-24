@@ -6,22 +6,15 @@ namespace MIQ.Parsing;
 /// </summary>
 public static class NiftiParser
 {
-    public static MiqImage Parse(byte[] data, string? formatLabel = null)
+    /// <param name="compressed">Whether the file was gzipped; only affects the
+    /// format label.</param>
+    public static MiqImage Parse(byte[] data, bool compressed = false)
     {
-        var header = ParseHeader(data, formatLabel);
+        var header = ParseHeader(data, compressed);
 
-        // ValidateSlicePlaneExtent (in ParseHeader) bounds any pairwise product of
-        // width/height/depth, so this triple product can't wrap; subtracting
-        // VoxOffset from data.Length rather than adding it to volumeBytes keeps
-        // the comparison overflow-free too (same pattern as MghParser/MifParser).
-        // Volume 0 only, not x Volumes: this belongs HERE, not in ParseHeader
-        // (called on a 1 KB probe by the vol-0-first partial loads, which must
-        // keep working on a file containing only volume 0), and volume 0 is what
-        // every first render decodes regardless of load path. A file truncated
-        // beyond volume 0 already degrades gracefully — Voxel() bounds-checks
-        // every read against PayloadCount and zero-fills out of range — so this
-        // guard's job is purely to reject early, before slice extraction attempts
-        // to allocate a plane for data that was never there.
+        // Require volume 0 only: reads past it are already bounds-checked and
+        // zero-filled. Lives here, not in ParseHeader, which partial loads call on
+        // a 1 KB probe. Subtracting on the left keeps the comparison overflow-free.
         var volumeBytes = (long)header.Width * header.Height * header.Depth
                            * header.Datatype.BytesPerVoxel();
         if (data.Length - (long)header.VoxOffset < volumeBytes)
@@ -35,24 +28,28 @@ public static class NiftiParser
         };
     }
 
-    public static MiqHeader ParseHeader(byte[] data, string? formatLabel = null)
+    /// Pass <paramref name="compressed"/> correctly: partial loads keep this header
+    /// as the displayed image's.
+    public static MiqHeader ParseHeader(byte[] data, bool compressed = false)
     {
         if (data.Length < 4) throw MiqException.TruncatedData();
 
         var headerSizeLE = MiqBinaryReader.Int32(data, 0, littleEndian: true);
         var headerSizeBE = MiqBinaryReader.Int32(data, 0, littleEndian: false);
 
+        // NIfTI-1 keeps the file-kind label (null → "NIfTI-1" via DisplayName);
+        // NIfTI-2 shares those file kinds, so it names itself.
         MiqHeader header;
         if (headerSizeLE == 348 || headerSizeBE == 348)
-            header = ParseNifti1Header(data, littleEndian: headerSizeLE == 348, formatLabel);
+            header = ParseNifti1Header(data, littleEndian: headerSizeLE == 348,
+                compressed ? MiqFileKind.NiiGz.DisplayName() : null);
         else if (headerSizeLE == 540 || headerSizeBE == 540)
-            header = ParseNifti2Header(data, littleEndian: headerSizeLE == 540, formatLabel);
+            header = ParseNifti2Header(data, littleEndian: headerSizeLE == 540,
+                compressed ? "Compressed NIfTI-2" : "NIfTI-2");
         else
             throw MiqException.InvalidHeaderSize(headerSizeLE);
 
-        // Header-only representability guards: safe here (and reached by the
-        // vol-0-first partial loads, which call ParseHeader on a 1 KB probe)
-        // precisely because neither asserts the payload is present.
+        // Header-only guards; neither asserts the payload is present.
         var bpv = header.Datatype.BytesPerVoxel();
         MiqParser.ValidateDimensionExtent(header.Dimensions, bpv);
         MiqParser.ValidateSlicePlaneExtent(header.Width, header.Height, header.Depth);
@@ -200,29 +197,13 @@ public static class NiftiParser
         return datatype;
     }
 
-    /// vox_offset is wider than the <c>int</c> it ends up in — a float32 in
-    /// NIfTI-1, an int64 in NIfTI-2 — and a bare <c>(int)</c> cast of a value that
-    /// doesn't fit produces an unspecified result the C# spec declines to define.
-    ///
-    /// Measured on net8/x64 (JIT-opaque values, so not compile-time folding):
-    /// <c>(int)</c> of 1e10, +Inf, NaN and -1e10 all yield <b>int.MinValue</b> — it
-    /// does <i>not</i> saturate, contrary to what this file's FIXME and CLAUDE.md
-    /// both asserted for years. So the real defect was never a net8-vs-net462
-    /// divergence: on <i>both</i> targets int.MinValue is floored straight back to
-    /// the header size by the caller's Math.Max, and a file declaring an absurd
-    /// vox_offset silently reads its payload from 352 and renders garbage instead of
-    /// reporting anything. Uniformly wrong is worse than divergent, not better.
-    ///
-    /// Resolving it here removes the dependence on unspecified behaviour altogether,
-    /// which is what actually matters: the guard holds whatever any future runtime
-    /// decides that cast should mean.
+    /// vox_offset (float32 in NIfTI-1, int64 in NIfTI-2) narrowed to int without
+    /// relying on an unspecified out-of-range cast (net8/x64 yields int.MinValue,
+    /// which the caller would silently floor to the header size, reading garbage).
     ///
     /// Non-finite and negative values return 0, which the caller floors to the
-    /// header size — exactly what the cast already did on both targets, so nothing
-    /// that previews today changes (and vox_offset = 0 is the common "data starts
-    /// after the header" spelling). Only an offset genuinely past int range is
-    /// rejected: no real file has one, and reading from the wrong place silently is
-    /// worse than a clear error.
+    /// header size (vox_offset = 0 is the common "data follows the header"
+    /// spelling). Only an offset past int range is rejected.
     private static int NarrowVoxOffset(double value)
     {
         if (double.IsNaN(value) || value < 0) return 0;
@@ -237,38 +218,16 @@ public static class NiftiParser
         return (int)value;
     }
 
-    /// Non-finite scl_slope/scl_inter mean "no scaling", which this format already
-    /// spells as slope 0 — so normalise to 0/0 and let the existing unscaled path
-    /// handle it.
-    ///
-    /// This is NOT corrupt-header hardening. nibabel uses NaN as its marker for
-    /// "scaling undefined": it resets both fields to NaN when it loads an image (to
-    /// record that the scaling was consumed by the read), that NaN lives in the
-    /// header struct it writes back out, and its own reader maps a non-finite slope
-    /// to "no scaling" on the way back in. A NaN slope is therefore an ordinary
-    /// thing to find in a file from the most widely used NIfTI toolchain, and every
-    /// reader is expected to render it normally.
-    ///
-    /// Without this the volume is destroyed rather than mis-scaled: MiqVolume.Voxel
-    /// gates on `slope != 0`, which is TRUE for NaN, so every voxel becomes
-    /// raw*NaN + inter = NaN. IntensityWindow then finds no finite value, returns a
-    /// null window, and the whole file renders as a black square with no error —
-    /// while the metadata panel reports "Scaling: x NaN + NaN".
-    ///
-    /// Both fields must be finite for the pair to be usable (a finite slope with a
-    /// NaN intercept still yields NaN for every voxel), so they are dropped
-    /// together. Finite pairs pass through untouched.
+    /// Non-finite scl_slope/scl_inter mean "no scaling" (slope 0). nibabel routinely
+    /// writes NaN here to mark scaling as undefined, so this is normal input, not
+    /// corruption. Without it, `slope != 0` is true for NaN and every voxel becomes
+    /// NaN (a black square). Both must be finite, so they are dropped together.
     private static (float slope, float inter) NormalizeScaling(float slope, float inter) =>
         MiqCompat.IsFinite(slope) && MiqCompat.IsFinite(inter) ? (slope, inter) : (0f, 0f);
 
-    /// NIfTI-2 stores dim[] as int64. Truncating to int keeps only the low 32 bits,
-    /// which turns an unrenderable size into a plausible one — 2^32+1 becomes 1 —
-    /// so ValidateDimensionExtent and ValidateSlicePlaneExtent never see the value
-    /// they exist to reject, and the file renders as a 1-voxel axis instead.
-    ///
-    /// Only the slots <see cref="ParseDimensions"/> actually reads are checked:
-    /// dim[0] (ndim) and dim[1..upper]. Trailing slots past ndim are routinely junk
-    /// in real files — rejecting on those would turn away valid data.
+    /// NIfTI-2 stores dim[] as int64; truncating would turn 2^32+1 into 1 and hide
+    /// it from the extent guards. Only the slots <see cref="ParseDimensions"/> reads
+    /// are checked — trailing slots past ndim are often junk in real files.
     private static int[] NarrowDimensions(long[] dim)
     {
         var ndim = dim[0];

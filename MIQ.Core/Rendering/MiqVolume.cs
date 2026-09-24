@@ -14,9 +14,8 @@ public enum MiqOrientation { Stored, Neurological, Radiological }
 /// percentile-windows (legacy). <c>Auto</c> colours a detected label volume —
 /// canonical FreeSurfer colours when the labels look like a FreeSurfer parcellation,
 /// otherwise deterministic random colours. <c>Random</c> forces random colours and
-/// never consults the FreeSurfer table. Detection (see
-/// <see cref="MiqVolume.BuildSegmentationLut"/>) only ever fires for integer,
-/// identity-scaled data with few distinct values, so intensity images are unaffected.
+/// never consults the FreeSurfer table. Detection: see
+/// <see cref="MiqVolume.BuildSegmentationLut"/>.
 public enum MiqSegmentationColoring { Off, Auto, Random }
 
 // Percentiles are computed over voxels pooled from all three center slices
@@ -159,23 +158,18 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         => CenterInteractiveState(options, maxDimension).Slices;
 
     /// Single-decode path for the initial interactive preview. Prepares the three
-    /// center slices ONCE, then derives from that one decode: the segmentation LUT
-    /// (when the file is a detected label volume), the shared intensity window (only
-    /// when there is no LUT), and the three finished CenterSlices. This replaces the
-    /// BuildSegmentationLut + SharedWindow + ExtractSlice×3 sequence the plugin used,
-    /// which re-decoded the same center slices 2–3× over; the output is identical
-    /// (the per-call ExtractSlice always re-derived these exact center slices).
+    /// center slices once and derives from them the segmentation LUT (if a label
+    /// volume), the shared intensity window (if no LUT), and the finished slices.
+    /// Output is identical to BuildSegmentationLut + SharedWindow + ExtractSlice×3.
     public (SegmentationLut? Lut, IntensityWindow.Bounds? Window,
             IReadOnlyDictionary<SlicePlane, CenterSlice> Slices)
         CenterInteractiveState(MiqRenderingOptions options, int maxDimension = 512)
     {
         var planes = new[] { SlicePlane.Coronal, SlicePlane.Sagittal, SlicePlane.Axial };
         var prepared = new PreparedSlice[planes.Length];
-        // Decode the three center planes in parallel. PrepareSlice is read-only over
-        // the immutable Storage buffer and writes only its own freshly-allocated arrays
-        // into a distinct slot, so there is no shared mutable state to guard. The pool
-        // + finalize steps below run on the calling thread in fixed plane order, so the
-        // window and output stay byte-identical regardless of decode completion order.
+        // PrepareSlice only reads Storage and writes its own slot, so the decodes are
+        // safe to parallelise. Pooling + finalize below run in fixed plane order, so
+        // output is byte-identical regardless of completion order.
         Parallel.Invoke(
             () => prepared[0] = PrepareSlice(planes[0]),
             () => prepared[1] = PrepareSlice(planes[1]),
@@ -254,10 +248,9 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         }
     }
 
-    // A read-but-not-yet-finished slice. Exactly one of Gray (intensity floats,
-    // to be windowed) / Rgb (interleaved RGB bytes, already display-ready) is set.
-    // Internal (not private) so the interactive control can cache one between
-    // renders — see PrepareInteractive / FinalizeInteractive.
+    // A decoded but not yet finished slice. Exactly one of Gray (intensity floats,
+    // to be windowed) / Rgb (interleaved RGB bytes, display-ready) is set.
+    // Internal so the interactive control can cache one between renders.
     internal readonly struct PreparedSlice(float[]? gray, byte[]? rgb, SliceConfig cfg, float maxExt)
     {
         public float[]? Gray { get; } = gray;
@@ -266,7 +259,7 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         public float MaxExt { get; } = maxExt;
     }
 
-    // --- Interactive triplanar API (additive; CenterSlices path untouched) ---
+    // --- Interactive triplanar API ---
 
     /// Stored-orientation axis roles for a plane: (perpendicular, horizontal,
     /// vertical) indices into the (Width, Height, Depth) voxel axes.
@@ -308,13 +301,9 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         return new CenterSlice(Finalize(p, window, lut, maxDimension), p.Cfg.Labels);
     }
 
-    // ExtractSlice split into its two halves so the interactive control can reuse a
-    // decoded slice across a window/level change. The decode (PrepareInteractive) is
-    // invariant under the intensity window — only the FINALIZE step (windowing +
-    // resample) depends on it. So a right-drag that re-windows the same slice can skip
-    // the decode entirely: cache the PreparedSlice keyed by (plane, index, timepoint),
-    // then call FinalizeInteractive per window revision. PrepareInteractive + (window)
-    // FinalizeInteractive is byte-for-byte ExtractSlice for the same arguments.
+    // ExtractSlice split in two so a window/level drag can re-finalize a cached
+    // decode instead of re-decoding: only Finalize depends on the window.
+    // PrepareInteractive + FinalizeInteractive is byte-for-byte ExtractSlice.
     internal PreparedSlice PrepareInteractive(SlicePlane plane, int sliceIndex, int timepoint = 0)
         => PrepareSlice(plane, sliceIndex, timepoint);
 
@@ -326,23 +315,14 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
     /// Decide whether this volume should be rendered as a coloured segmentation
     /// and, if so, build the shared label→RGB LUT. Returns null (→ percentile
     /// windowing) when colouring is Off, the datatype/scaling is intensity-like,
-    /// or the sampled center slices don't look like integer labels.
+    /// or the sampled center slices don't look like labels.
     ///
-    /// Detection is deliberately conservative: only integer or float datatypes
-    /// with identity scaling are considered, every sampled value must be integral
-    /// (so a float intensity image with continuous values is rejected), the
-    /// distinct-label count must stay under <see cref="SegmentationLut.MaxLabels"/>
-    /// (a resource guard, not a discriminator — real label counts and intensity
-    /// value counts overlap completely), AND the sampled voxels must be
-    /// piecewise-constant rather than noisy — see <see cref="IsPiecewiseConstant"/>.
-    /// Integrality alone is vacuous for an integer datatype (a uint8 anatomical is
-    /// integral by construction), so piecewise-constancy is the gate that actually
-    /// separates a label map from a normalised intensity image of the same
-    /// datatype. Sampling reuses the three center slices (the same voxels the
-    /// intensity window pools), so detection adds no extra read on the off path.
-    /// The one exception is a single-label center sample, which triggers a
-    /// full-volume-0 confirm before committing to the binary (white) LUT — see
-    /// <see cref="ScanVolume0"/>.
+    /// Deliberately conservative: integer or float datatype with identity scaling,
+    /// every sampled value integral, at most <see cref="SegmentationLut.MaxLabels"/>
+    /// distinct values (a resource guard, not a discriminator), AND piecewise-constant
+    /// (<see cref="IsPiecewiseConstant"/> — the real gate, since integrality is
+    /// vacuous for integer data). Samples the three center slices; only a
+    /// single-label sample triggers a full-volume-0 confirm (<see cref="ScanVolume0"/>).
     public SegmentationLut? BuildSegmentationLut(MiqRenderingOptions options)
     {
         if (!SegmentationEligible(options)) return null;
@@ -358,11 +338,8 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         return FinishSegmentationLut(labels, options);
     }
 
-    // Cheap, no-decode eligibility gate: only integer/float identity-scaled data in
-    // a non-Off mode is ever a segmentation candidate. Separated from the decode so
-    // CenterInteractiveState can check it before deciding whether to run label
-    // detection over slices it has already prepared. Equivalent to the original
-    // guard (SclInter != 0 || (SclSlope != 0 && SclSlope != 1) → reject), negated.
+    // Cheap, no-decode eligibility gate: integer/float identity-scaled data in a
+    // non-Off mode.
     private bool SegmentationEligible(MiqRenderingOptions options)
     {
         if (options.Segmentation == MiqSegmentationColoring.Off) return false;
@@ -372,10 +349,9 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
     }
 
     // Collect the distinct foreground labels present in already-prepared center
-    // slices. Returns null when the data is not label-like — any RGB slice, any
-    // fractional value (→ intensity), or more than MaxLabels distinct values (→ a
-    // dense intensity image). Background (0) is removed; an all-background sample
-    // yields an empty set, which FinishSegmentationLut maps to null.
+    // slices. Returns null for any RGB slice, fractional value, or more than
+    // MaxLabels distinct values. Background (0) is removed, so an all-background
+    // sample yields an empty set.
     private static HashSet<int>? CollectLabels(PreparedSlice[] prepared)
     {
         var labels = new HashSet<int>();
@@ -397,31 +373,19 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
 
     // A label map is built from regions of constant value, so adjacent foreground
     // voxels are nearly always equal; an intensity image is noisy at every voxel.
-    // This is what actually separates the two for an integer datatype, where the
-    // integrality check in CollectLabels is vacuous (any integer image passes it)
-    // and the distinct-value count overlaps completely between real label maps and
-    // normalised intensity images of the same bit depth.
     //
-    // Measures, over the three prepared center slices, the fraction of
-    // horizontally adjacent voxel pairs that differ, counting only pairs where
-    // BOTH voxels are foreground (non-zero) — background dominates most volumes
-    // and would otherwise swamp the ratio. Adjacency runs along a stored row only
-    // (Gray is row-major, column-fastest — see GatherGray) and never wraps between
-    // rows; a non-finite voxel breaks the chain rather than pairing across the gap.
+    // Measures the fraction of horizontally adjacent pairs that differ, counting
+    // only pairs where BOTH voxels are foreground (background would swamp the
+    // ratio). Pairs never wrap rows; a non-finite voxel breaks the chain.
     //
-    // Returns false (reject as intensity) when the pooled ratio exceeds 0.30;
-    // true (accept) when it does not; null (abstain — too little foreground to
-    // judge) when fewer than 256 qualifying pairs were sampled in total. Callers
-    // must treat null as "keep the existing verdict", not as a rejection — sparse
-    // masks and thin structures have little foreground and must not be rejected
-    // for lack of samples.
+    // Returns false (intensity) when the ratio exceeds 0.30, true otherwise, and
+    // null (abstain) below 256 pairs — callers keep their existing verdict, so
+    // sparse masks aren't rejected for lack of samples.
     //
-    // May exit early ONLY on the reject side (>= 1024 pairs sampled AND running
-    // ratio > 0.60 — well clear of the worst real label-map transient, 0.201).
-    // There is no accept-side early exit: FinishSegmentationLut's FreeSurfer
-    // signature test and the rank-based random palette are both functions of the
-    // COMPLETE label set, so accepting must always finish decoding all three
-    // planes (e.g. wmparc has collected only 14 of its 136 labels at 2000 pairs).
+    // Early exit is reject-only (>= 1024 pairs AND ratio > 0.60; worst real
+    // label-map transient is 0.201). Accepting must see all three planes: the
+    // FreeSurfer test and random palette depend on the COMPLETE label set
+    // (wmparc has only 14 of its 136 labels after 2000 pairs).
     private static bool? IsPiecewiseConstant(PreparedSlice[] prepared)
     {
         const long RejectMinPairs = 1024;
@@ -462,13 +426,11 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         return (double)diff / total <= AcceptMaxRatio;
     }
 
-    // Choose the final LUT from a collected label set.
-    // A binary mask (one foreground label) reads best as plain white — a palette
-    // colour conveys nothing when there's only one structure. The center slices can
-    // MISS a spatially localized second structure, so a single-label center sample
-    // is only provisional: confirm it against the whole first volume before
-    // committing to the (sticky) monochrome LUT. Multi-label volumes pick the
-    // FreeSurfer palette (Auto only) or the random palette.
+    // Choose the final LUT from a collected label set. A binary mask renders
+    // white, but the center slices can miss a localized second structure, so a
+    // single-label sample is confirmed against all of volume 0 before committing
+    // to the (sticky) monochrome LUT. Multi-label volumes get the FreeSurfer
+    // palette (Auto only) or the random palette.
     private SegmentationLut? FinishSegmentationLut(HashSet<int> labels, MiqRenderingOptions options)
     {
         if (labels.Count == 0) return null;
@@ -499,26 +461,19 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         return 0;
     }
 
-    // Confirm the binary-vs-multi decision against the ENTIRE first volume. Only
-    // called when the center sample already looks binary (exactly one foreground
-    // label), so the common multi-label and intensity files never reach it. Returns
-    // the instant a disqualifying voxel appears (a second distinct non-zero label
-    // -> MultiLabel, or a fractional value -> Intensity), so only a true binary mask
-    // scans to completion. Volume 0 is fully present even on partial vol-0-first
-    // loads (the payload is sized to it).
+    // Confirm a single-label center sample against ALL of volume 0 (present even
+    // on partial loads). Returns at the first disqualifying voxel — a second
+    // label (MultiLabel) or a fractional value (Intensity) — so only a true
+    // binary mask scans to completion.
     private Vol0LabelShape ScanVolume0(int label)
     {
-        // MIF custom strides: volume 0's elements may be interleaved with other
-        // volumes, so fall back to the correct (slower) per-voxel walk. Standard
-        // row-major formats (NIfTI/MGH/NRRD) take the fast contiguous path below.
+        // MIF custom strides may interleave volumes: use the per-voxel walk.
         if (_image.ElementStrides is not null)
             return ScanVolume0PerVoxel(label);
 
-        // Volume 0 is the first N payload elements, contiguous. The binary question
-        // depends only on which values are present, not their position, so scan the
-        // raw buffer sequentially with the datatype switch hoisted OUT of the loop
-        // and integers compared directly (no VoxelElementIndex, no bounds checks per
-        // voxel, no float conversion for integer data).
+        // Row-major formats: volume 0 is the first N payload elements. Only which
+        // values occur matters, not where, so scan the raw buffer sequentially with
+        // the datatype switch hoisted out of the loop.
         var s = _image.Storage;
         var bpv = H.Datatype.BytesPerVoxel();
         var elems = Math.Min((long)Width * Height * Depth, (long)_image.PayloadCount / bpv);
@@ -586,9 +541,7 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         return Vol0LabelShape.Binary;
     }
 
-    // Correct-for-any-layout fallback (MIF custom strides): walks every voxel of
-    // volume 0 through VoxelElementIndex. Slower, but only reached for the rare
-    // strided-format binary candidate.
+    // Layout-agnostic fallback for MIF custom strides.
     private Vol0LabelShape ScanVolume0PerVoxel(int label)
     {
         for (var z = 0; z < Depth; z++)
@@ -606,13 +559,8 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
 
     private static bool IsLabelCandidateDatatype(MiqDatatype dt) => dt switch
     {
-        // Integer datatypes are the obvious carriers. Float datatypes are included
-        // because label maps are frequently re-saved as float by downstream tools
-        // (resampling, arithmetic on the labels) while still holding integral
-        // values; the per-value integrality check in BuildSegmentationLut is what
-        // actually gates them, so a genuine float intensity image (continuous
-        // values, or > MaxLabels distinct) is still rejected. Rgb24/Rgba32 take the
-        // RGB path, not labels.
+        // Floats included: label maps are often re-saved as float by downstream
+        // tools. Continuous float intensity fails the integrality check.
         MiqDatatype.Int8 or MiqDatatype.Uint8 or MiqDatatype.Int16 or MiqDatatype.Uint16
             or MiqDatatype.Int32 or MiqDatatype.Uint32
             or MiqDatatype.Float32 or MiqDatatype.Float64 => true,
@@ -622,9 +570,9 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
     private PreparedSlice PrepareSlice(
         SlicePlane plane, int? sliceIndex = null, int timepoint = 0)
     {
-        var dx = Math.Max(1e-6f, Math.Abs(Pixdim(1)));
-        var dy = Math.Max(1e-6f, Math.Abs(Pixdim(2)));
-        var dz = Math.Max(1e-6f, Math.Abs(Pixdim(3)));
+        var dx = SanitizedSpacing(Pixdim(1));
+        var dy = SanitizedSpacing(Pixdim(2));
+        var dz = SanitizedSpacing(Pixdim(3));
 
         var dims = new[] { Width, Height, Depth };
         var pixs = new[] { dx, dy, dz };
@@ -665,23 +613,13 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
     }
 
     // Decode one grayscale slice into a float[] in row-major (col-fastest) order.
-    // Equivalent to the former `values[i++] = Voxel(x,y,z,t)` loop, but with the
-    // per-slice constants (datatype, endianness, bytes-per-voxel, payload bounds,
-    // scaling) hoisted OUT of the inner loop and the value read inlined straight
-    // from Storage — skipping Voxel()→RawVoxelValue()'s repeated BytesPerVoxel
-    // calls, redundant bounds check, and the MiqBinaryReader.Slice() span build.
-    //
-    // Bit-identity notes (this is the step most prone to a silent decode bug):
-    //   • x,y,z are always in range here (slice/row/col are clamped to their axis
-    //     dims and {SliceAxis,HAxis,VAxis} is a permutation of {0,1,2}), so Voxel's
-    //     x/y/z guard never fires; only the t guard and the byteOffset guard matter.
-    //   • An out-of-range timepoint zeroes the whole slice WITHOUT scaling — exactly
-    //     Voxel's `return 0f` on the t guard (a fresh float[] is already zeroed).
-    //   • An out-of-range byteOffset yields plain 0f, NOT `intercept` — Voxel returns
-    //     0f before reaching the scaling line, so scaling must be skipped on that path.
-    //   • In-range reads apply `slope != 0 ? raw*slope+intercept : raw`, as Voxel does.
-    // Strided layouts (MIF) and datatypes outside the hot set fall back to the
-    // verbatim per-voxel Voxel() loop, staying identical there.
+    // Must equal a per-voxel Voxel(x,y,z,t) loop bit for bit; it is just inlined
+    // with the per-slice constants hoisted. Invariants that keep it identical:
+    //   • x,y,z are always in range, so only Voxel's t and byteOffset guards matter.
+    //   • Out-of-range timepoint or byteOffset → plain 0f, NOT `intercept` (Voxel
+    //     returns before scaling).
+    //   • In-range reads apply `slope != 0 ? raw*slope+intercept : raw`.
+    // Strided layouts (MIF) and non-hot datatypes use the Voxel() loop directly.
     private float[] GatherGray(SliceConfig cfg, int slice, int timepoint)
     {
         var values = new float[cfg.SliceWidth * cfg.SliceHeight];
@@ -713,12 +651,9 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         var intercept = H.SclInter;
         var scaled = slope != 0f;
 
-        // For the standard row-major layout the relative byte offset is AFFINE in
-        // (row, col): VoxelElementIndex = slice·esS + h·esH + v·esV + t·tStride with
-        // h = ±col, v = ±row, so the offset advances by a fixed per-column / per-row
-        // stride. Precompute the two strides + the (row 0, col 0) corner once, then
-        // the inner loop just adds a stride per step — no per-voxel Coordinate(),
-        // VoxelElementIndex(), or bounds check. Element strides: x→1, y→Width, z→W·H.
+        // In row-major layout the element index is affine in (row, col):
+        // slice·esS + h·esH + v·esV + t·tStride with h = ±col, v = ±row. So precompute
+        // the (row 0, col 0) corner and step by a fixed stride per column / row.
         long EStride(int axis) => axis == 0 ? 1 : axis == 1 ? Width : (long)Width * Height;
         var esH = EStride(cfg.HAxis);
         var esV = EStride(cfg.VAxis);
@@ -730,13 +665,9 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         var colElemStride = cfg.HReversed ? -esH : esH; // h = HReversed ? HDim-1-col : col
         var rowElemStride = cfg.VReversed ? -esV : esV; // v = VReversed ? VDim-1-row : row
 
-        // The map is affine and monotone per axis, so its byte-offset extremes over
-        // the slice rectangle are at the four corners. Computed in long (no wrap) to
-        // decide IN-RANGE without false positives. When the whole slice is in range
-        // every offset is < payloadCount ≤ int.MaxValue, so the fast loop below runs
-        // in int with no per-voxel guard and no overflow. equals byte-for-byte what
-        // the guarded loop produces (same Storage bytes, same decode, same scaling) —
-        // the offsets are the same VoxelElementIndex·bpv values, just accumulated.
+        // Affine and monotone per axis, so the offset extremes are at the corners.
+        // Checked in long; if the whole slice is in range, every offset fits int and
+        // the fast loop needs no per-voxel guard.
         var lastRow = cfg.OuterCount - 1L;
         var lastCol = cfg.InnerCount - 1L;
         long minElem = baseElem, maxElem = baseElem;
@@ -784,9 +715,8 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
             return values;
         }
 
-        // Out-of-range fallback (e.g. an out-of-range timepoint on a partial vol-0
-        // load makes some offsets exceed the payload): the exact per-voxel guarded
-        // path, byte-identical to Voxel's 0f-on-out-of-range behaviour.
+        // Some offsets exceed the payload (e.g. a later timepoint on a partial vol-0
+        // load): per-voxel guarded path, matching Voxel's 0f-on-out-of-range.
         var i = 0;
         for (var row = 0; row < cfg.OuterCount; row++)
             for (var col = 0; col < cfg.InnerCount; col++)
@@ -844,6 +774,16 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
 
     private float Pixdim(int i) => i < H.Pixdim.Count ? H.Pixdim[i] : 1f;
 
+    /// Voxel spacing used for rendering: |value| when finite and positive, else 1
+    /// (zero spacing is common in hand-written headers; mainstream viewers read it
+    /// as 1). Render-time only — the metadata panel shows the raw header values.
+    /// Port of MIQCore's <c>sanitizedSpacing</c>.
+    internal static float SanitizedSpacing(float value)
+    {
+        var magnitude = Math.Abs(value);
+        return MiqCompat.IsFinite(magnitude) && magnitude > 0 ? magnitude : 1f;
+    }
+
     private float Voxel(int x, int y, int z, int t)
     {
         if (x < 0 || x >= Width || y < 0 || y >= Height ||
@@ -877,9 +817,7 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
             MiqDatatype.Uint32 => MiqBinaryReader.Uint32(s, abs, le),
             MiqDatatype.Float32 => MiqCompat.Int32BitsToSingle((int)MiqBinaryReader.Uint32(s, abs, le)),
             MiqDatatype.Float64 => (float)MiqCompat.Int64BitsToDouble((long)MiqBinaryReader.Uint64(s, abs, le)),
-            // RGB datatypes normally take the dedicated ReadRgb path; this
-            // luminance fallback only fires if a grayscale read is ever asked
-            // of RGB data, so it still renders something rather than nothing.
+            // RGB normally takes ReadRgb; luminance fallback just in case.
             MiqDatatype.Rgb24 or MiqDatatype.Rgba32 =>
                 0.299f * _image.Byte(byteOffset) + 0.587f * _image.Byte(byteOffset + 1)
                 + 0.114f * _image.Byte(byteOffset + 2),

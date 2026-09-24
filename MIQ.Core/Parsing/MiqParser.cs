@@ -21,33 +21,24 @@ public static class MiqParser
     /// Above this size, an uncompressed multi-volume NIfTI is loaded volume-0-first
     /// (then expanded in the background) so the preview appears without waiting for
     /// the whole file — a large win on slow/network storage. Smaller files load
-    /// fully up front (the partial dance isn't worth a brief scrubber flicker).
-    /// Multi-volume .nii.gz already loads volume 0 first regardless of size.
+    /// fully up front.
     /// Non-const + internal so it can be lowered to exercise the path on small files.
     internal static long PartialLoadThreshold = 150L * 1024 * 1024;
 
     /// Minimum volume count for the .nii.gz vol-0-first partial load to be worth it.
-    /// The partial path decompresses only volume 0, but via the managed GZipStream
-    /// (libdeflate can't stop mid-member), which on the shipping net462 plugin is
-    /// 15–50× slower than libdeflate. Decompressing 1/N of the data at that penalty
-    /// only beats a single libdeflate pass over the whole file once N exceeds ~15–50,
-    /// so for a small series (multi-echo GRE/QSM, phase/magnitude pairs — up to a dozen
-    /// volumes) a full parse is faster on the real plugin AND avoids paying twice
-    /// (volume 0 is managed-gunzip'd now, then the WHOLE file — volume 0 again — is
-    /// libdeflate-decompressed on the first scrub) while making the scrubber live
-    /// immediately. Genuinely multi-volume series (DWI/fMRI, dozens–hundreds of volumes)
-    /// stay on the partial path, where the fractional decompress/read dominates the
-    /// managed-gzip penalty and the slow/network-storage latency win it exists for is real.
-    /// NB the net8 MIQ.Perf harness uses .NET 8's fast managed gzip, so it *understates*
-    /// the partial-path cost and will read this fall-through as a "regression"; the win is
-    /// on the net462 plugin. Non-const + internal so tests can vary it.
+    /// The partial path must use managed gzip (libdeflate can't stop mid-member),
+    /// which on net462 is 15–50× slower than libdeflate, so decompressing 1/N of
+    /// the file only wins for large N. Small series (multi-echo, phase/magnitude)
+    /// parse fully instead, with the scrubber live immediately.
+    /// NB MIQ.Perf runs on net8's fast gzip, so it misreads this as a regression.
+    /// Non-const + internal so tests can vary it.
     internal static int PartialGzipMinVolumes = 12;
 
     /// <summary>
     /// Optional faster gzip decompressor. Given the file path, returns the
     /// fully-decompressed bytes. The QuickLook plugin sets this to a native
-    /// libdeflate implementation (the .NET Framework built-in gzip is ~5–10×
-    /// slower). When null, the built-in streaming path is used.
+    /// libdeflate implementation (.NET Framework's built-in gzip is far slower).
+    /// When null, the built-in streaming path is used.
     /// </summary>
     public static Func<string, byte[]>? GzipDecompressorOverride;
 
@@ -64,7 +55,7 @@ public static class MiqParser
 
         return kind switch
         {
-            MiqFileKind.Nii or MiqFileKind.NiiGz     => NiftiParser.Parse(data, formatLabel),
+            MiqFileKind.Nii or MiqFileKind.NiiGz     => NiftiParser.Parse(data, kind.IsCompressed()),
             MiqFileKind.Mgh or MiqFileKind.Mgz       => MghParser.Parse(data, formatLabel),
             MiqFileKind.Mif or MiqFileKind.MifGz     => MifParser.Parse(data, formatLabel),
             MiqFileKind.Nrrd                         => NrrdParser.Parse(data, formatLabel),
@@ -87,10 +78,6 @@ public static class MiqParser
         var kind = MiqFileKindExtensions.FromPath(filePath)
                    ?? throw MiqException.UnsupportedFileFormat();
 
-        // Uncompressed NIfTI volume-0-first paths. Above MaxArrayBytes the full
-        // data can't be held, so the partial is permanent (blocked, no scrubber);
-        // above PartialLoadThreshold it's a latency optimisation that expands in
-        // the background. Both fall back to a full parse for 3-D / small files.
         if (kind == MiqFileKind.Nii)
         {
             var len = new FileInfo(filePath).Length;
@@ -123,7 +110,7 @@ public static class MiqParser
             return Parse(filePath);
 
         MiqHeader header;
-        try { header = NiftiParser.ParseHeader(probe, kind.DisplayName()); }
+        try { header = NiftiParser.ParseHeader(probe, compressed: true); }
         catch { return Parse(filePath); }
 
         if (header.Volumes <= 1)
@@ -137,11 +124,8 @@ public static class MiqParser
         if (budget >= (long)isize || budget > int.MaxValue)
             return Parse(filePath); // volume 0 is the whole file
 
-        // Too few volumes for the partial dance to pay off: a full libdeflate parse
-        // is cheaper than slow-managed-gunzipping volume 0 (and re-decompressing the
-        // whole file on first scrub), and leaves the scrubber live immediately. Only
-        // when the full data fits a byte[] — an oversized file (isize > MaxArrayBytes)
-        // can't be parsed whole, so it must stay on the permanent blocked vol-0 view.
+        // Too few volumes to pay off (see PartialGzipMinVolumes) — unless the full
+        // data can't fit a byte[], which must stay on the blocked vol-0 view.
         if (header.Volumes < PartialGzipMinVolumes && isize <= (ulong)MaxArrayBytes)
             return Parse(filePath);
 
@@ -182,7 +166,7 @@ public static class MiqParser
         var probe = new byte[1024];
         var probed = ReadFully(fs, probe, probe.Length);
         MiqHeader header;
-        try { header = NiftiParser.ParseHeader(Trim(probe, probed)); }
+        try { header = NiftiParser.ParseHeader(Trim(probe, probed), compressed: false); }
         catch { return Parse(filePath); }
 
         // A single volume is assumed to always fit; if a >2 GB file claims to be
@@ -245,21 +229,12 @@ public static class MiqParser
     }
 
     /// Rejects a header whose declared voxel extent (product of every axis ×
-    /// bytes-per-voxel) can't be represented in a long. Parsers derive their
-    /// required-payload size from that product, and C# multiplies unchecked — so
-    /// a wrapped product can slip past a `data.Length &lt; required` check and let a
-    /// tiny file claim an enormous volume. (Swift trapped here instead; the C#
-    /// failure is silent, which is why the guard matters more on this side.)
+    /// bytes-per-voxel) can't be represented in a long. C# multiplies unchecked, so
+    /// a wrapped product could slip past a `data.Length &lt; required` check.
     ///
-    /// Purely an arithmetic representability guard — it does NOT assert the
-    /// payload is present, so the bounded NIfTI vol-0-first cold load (whose
-    /// buffer holds only volume 0, and whose header probe is 1 KB) is unaffected.
-    /// Validating in each format's earliest shared header-parse step also protects
-    /// every downstream product, since each is ≤ this total.
-    ///
-    /// Non-positive axes are skipped rather than rejected: every caller has
-    /// already validated positivity, and skipping keeps a stray 0 from turning the
-    /// overflow test's division into a DivideByZeroException.
+    /// Arithmetic only — does NOT assert the payload is present, so partial loads
+    /// and the 1 KB header probe are unaffected. Non-positive axes are skipped
+    /// (callers already validated them; this avoids dividing by zero).
     internal static void ValidateDimensionExtent(IReadOnlyList<int> dims, int bytesPerVoxel)
     {
         long total = Math.Max(1, bytesPerVoxel);
@@ -272,17 +247,9 @@ public static class MiqParser
     }
 
     /// Rejects spatial dimensions whose slice planes would overflow the int
-    /// arithmetic that sizes a slice buffer. Any two of the three spatial axes can
-    /// become a plane's (width, height) — coronal is W×D, sagittal H×D, axial W×H,
-    /// and the reoriented modes only permute which pair — and a plane is allocated
-    /// as `new float[w * h]`, with RGB adding `new byte[w * h * 3]`. Both are int
-    /// multiplies, so an unvalidated pair wraps to a small or negative length.
-    ///
-    /// The bound sits far above anything reachable: it permits planes larger than
-    /// the CLR can allocate as a single array (a float[] tops out near 536 M
-    /// elements), so a header between this bound and reality still fails cleanly
-    /// with OutOfMemoryException rather than wrapping. No real volume is within
-    /// orders of magnitude of it.
+    /// arithmetic that sizes a slice buffer (`new float[w * h]`, RGB `w * h * 3`).
+    /// Any pair of spatial axes can form a plane. Headers between this bound and
+    /// the CLR array limit fail cleanly with OutOfMemoryException instead.
     internal static void ValidateSlicePlaneExtent(int width, int height, int depth)
     {
         ValidatePlanePair(width, height);

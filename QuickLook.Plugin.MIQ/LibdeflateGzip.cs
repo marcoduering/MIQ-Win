@@ -7,7 +7,7 @@ namespace QuickLook.Plugin.MIQ;
 
 /// <summary>
 /// Native gzip decompression via bundled libdeflate.dll — the .NET Framework
-/// built-in <c>GZipStream</c> is ~5–10× slower. Single-shot: we know the exact
+/// built-in <c>GZipStream</c> is ~15–50× slower. Single-shot: we know the exact
 /// output size from the gzip ISIZE footer, which is libdeflate's ideal case.
 /// Falls back to the managed path for the rare unreliable-ISIZE case.
 /// </summary>

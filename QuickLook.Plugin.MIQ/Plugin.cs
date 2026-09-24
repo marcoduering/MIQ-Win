@@ -80,37 +80,24 @@ public sealed class Plugin : IViewer
         {
             try
             {
-                // Re-read preferences every preview (a few hundred bytes —
-                // negligible next to parsing). Edits to MIQ.settings.ini apply
-                // on the next Space, no restart.
+                // Re-read every preview so ini edits apply on the next Space.
                 var settings = MiqSettings.Load();
                 var options = settings.Options;
                 var kind = MiqFileKindExtensions.FromPath(path);
 
-                // Phase 1: fast partial parse — for multi-volume .nii.gz this
-                // decompresses only volume 0 via streaming GZipStream, which
-                // is ~N× faster than decompressing all N volumes up front.
-                // For 3-D files or non-compressed formats it falls through to a
-                // full parse transparently (IsPartial remains false).
+                // Phase 1: volume-0-only load where it pays off (see ParsePartial);
+                // otherwise a full parse (IsPartial = false).
                 var image = MiqParser.ParsePartial(path);
                 if (cts.IsCancellationRequested) return;
 
                 var fmt = image.Header.FormatLabel ?? kind?.DisplayName() ?? "Unknown";
                 var volume = new MiqVolume(image, options.Orientation);
-                // One decode of the three center slices yields the segmentation LUT
-                // (opt-in; replaces intensity windowing for detected label volumes),
-                // the shared window (unused when a LUT is present), and the initial
-                // slices — instead of re-decoding the same slices in each of the
-                // former BuildSegmentationLut + SharedWindow + ExtractSlice×3 calls.
+                // One decode yields the segmentation LUT, the shared window (null
+                // when a LUT is present), and the initial slices.
                 var (lut, window, initial) = volume.CenterInteractiveState(options);
 
-                // No LUT and no window on a scalar volume means IntensityWindow
-                // pooled the three center slices and found not one finite voxel —
-                // the file is entirely NaN/±Inf. Every slice would then be uniformly
-                // black (Finalize emits a zeroed buffer when the window is null) and
-                // window/level would be inert, which is indistinguishable from a
-                // genuinely empty volume or a broken preview. Say so instead. Not an
-                // error: the file is well-formed, it just holds nothing renderable.
+                // No LUT and no window on a scalar volume: the center slices hold no
+                // finite voxel. Say so rather than render black squares (not an error).
                 if (window is null && lut is null && !volume.IsRgb)
                 {
                     control.Dispatcher.BeginInvoke(() =>
@@ -134,11 +121,9 @@ public sealed class Plugin : IViewer
 
                     _volume = volume;
 
-                    // Phase 2 is lazy: a multi-volume file that loaded only volume 0
-                    // gets an expansion callback, invoked by the control on the first
-                    // scrub gesture. Until then no background work runs, so flicking
-                    // through previews to glance at volume 0 stays instant. Blocked
-                    // (too-large) files never expand.
+                    // Phase 2 is lazy: the full load runs only on the first scrub
+                    // gesture, so flicking through previews does no background work.
+                    // Blocked (too-large) files never expand.
                     MiqTriPlanarControl view = null!;
                     var onExpand = !volume.IsExpanded && !image.ExpansionBlocked
                         ? () => StartExpansion(path, options, control, view, cts.Token)
@@ -182,8 +167,9 @@ public sealed class Plugin : IViewer
                 if (token.IsCancellationRequested) return;
                 var fullImage = MiqParser.Parse(path, token);
                 var fullVolume = new MiqVolume(fullImage, options.Orientation);
-                // Re-detect on the full volume so the scrubbed timepoints colour
-                // consistently (the LUT is label-keyed, so this matches volume 0).
+                // Rebuild the LUT for the new volume object. The random palette
+                // depends on the label set; this matches the initial LUT only
+                // because detection samples volume 0's center slices in both.
                 var fullLut = fullVolume.BuildSegmentationLut(options);
                 control.Dispatcher.BeginInvoke(() =>
                 {

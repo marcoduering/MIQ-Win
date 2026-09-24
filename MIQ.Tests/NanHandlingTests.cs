@@ -7,17 +7,9 @@ namespace MIQ.Tests;
 
 // Coverage for non-finite scl_slope / scl_inter in the NIfTI header.
 //
-// This is not corrupt-header hardening. nibabel uses NaN as its marker for
-// "scaling undefined" — it resets both fields to NaN when it loads an image (to
-// record that the scaling was consumed by the read), writes that NaN back out,
-// and maps a non-finite slope to "no scaling" when reading it back in. So a NaN
-// slope is an ordinary thing to find in a file from the most widely used NIfTI
-// toolchain, and such a file must preview normally.
-//
-// Same both-halves discipline as ParserGuardTests: golden.json only proves that
-// accepted files still render identically, so a normaliser that starts rewriting
-// legitimate scaling would fail silently. Each test pinning a non-finite input
-// therefore has a neighbour pinning the finite value it must leave alone.
+// nibabel routinely writes NaN scaling (see NiftiParser.NormalizeScaling), so such
+// files must preview normally. Same both-halves discipline as ParserGuardTests:
+// each non-finite input has a neighbour pinning the finite value left alone.
 public class NanHandlingTests
 {
     const int N1MinOffset = 352;
@@ -75,9 +67,7 @@ public class NanHandlingTests
     [InlineData(float.NaN, float.NaN)]
     public void Nifti1_NonFiniteScaling_IsTreatedAsNoScaling(float slope, float inter)
     {
-        // Must render the stored values, not NaN. Before this guard `slope != 0` was
-        // true for NaN, so every voxel became raw*NaN + inter = NaN, IntensityWindow
-        // found nothing finite to pool, and the file previewed as a black square.
+        // Must render the stored values, not NaN (`slope != 0` is true for NaN).
         var image = NiftiParser.Parse(Nifti1(sclSlope: slope, sclInter: inter));
         Assert.Equal(RawValue, FirstVoxel(image));
     }

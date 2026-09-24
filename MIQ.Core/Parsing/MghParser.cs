@@ -13,11 +13,8 @@ public static class MghParser
     {
         var header = ParseHeader(data, formatLabel);
 
-        // ValidateDimensionExtent (in ParseHeader) bounds this product, so the
-        // multiply can't wrap; subtracting the header from data.Length rather than
-        // adding it to payloadBytes keeps the comparison overflow-free too. Same
-        // accept/reject as before for every non-overflowing header — i.e. every
-        // real file — but a wrapped product can no longer pass the check.
+        // Bounded by ValidateDimensionExtent (in ParseHeader); the subtraction
+        // keeps the comparison overflow-free.
         var payloadBytes = (long)header.Width * header.Height * header.Depth * header.Volumes
                            * header.Datatype.BytesPerVoxel();
         if (data.Length - (long)HeaderSize < payloadBytes)
