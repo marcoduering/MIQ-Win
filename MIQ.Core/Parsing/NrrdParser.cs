@@ -80,32 +80,36 @@ public static class NrrdParser
         }
     }
 
-    // Returns the header text and the byte offset where the payload begins,
-    // splitting on the first blank line (CRLF preferred, then LF).
+    // Returns the header text and the byte offset where the payload begins.
     private static (string headerText, int payloadIndex) SplitHeader(byte[] data)
     {
-        var crlf = IndexOf(data, new byte[] { 0x0D, 0x0A, 0x0D, 0x0A });
-        if (crlf >= 0)
-            return (Encoding.UTF8.GetString(data, 0, crlf), crlf + 4);
-
-        var lf = IndexOf(data, new byte[] { 0x0A, 0x0A });
-        if (lf >= 0)
-            return (Encoding.UTF8.GetString(data, 0, lf), lf + 2);
-
-        throw new MiqException(
-            "NRRD header is missing the blank-line separator; detached headers (.nhdr) are not supported.");
+        var (headerEnd, payloadIndex) = FirstBlankLine(data);
+        if (headerEnd < 0)
+            throw new MiqException(
+                "NRRD header is missing the blank-line separator; detached headers (.nhdr) are not supported.");
+        return (Encoding.UTF8.GetString(data, 0, headerEnd), payloadIndex);
     }
 
-    private static int IndexOf(byte[] haystack, byte[] needle)
+    // The header ends at the *earliest* blank line (\n\n or \n\r\n). Walking
+    // newline to newline stops right there, so the payload is never scanned.
+    // A whole-file search for \r\n\r\n (tried before \n\n) used to let payload
+    // bytes win over the real separator of an LF header — two adjacent int16 LE
+    // voxels of value 2573 (0x0A0D) spell it — and scanned the entire payload.
+    // For a CRLF header the match starts one byte into \r\n\r\n, leaving a
+    // trailing \r on the header text, which the line split already drops.
+    private static (int headerEnd, int payloadIndex) FirstBlankLine(byte[] data)
     {
-        for (var i = 0; i <= haystack.Length - needle.Length; i++)
+        var newline = Array.IndexOf(data, (byte)0x0A);
+        while (newline >= 0)
         {
-            var match = true;
-            for (var j = 0; j < needle.Length; j++)
-                if (haystack[i + j] != needle[j]) { match = false; break; }
-            if (match) return i;
+            var next = newline + 1;
+            if (next < data.Length && data[next] == 0x0A)
+                return (newline, next + 1);
+            if (next + 1 < data.Length && data[next] == 0x0D && data[next + 1] == 0x0A)
+                return (newline, next + 2);
+            newline = next < data.Length ? Array.IndexOf(data, (byte)0x0A, next) : -1;
         }
-        return -1;
+        return (-1, -1);
     }
 
     // ── Header field parsing ─────────────────────────────────────────────────
