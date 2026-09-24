@@ -76,11 +76,8 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
     // slice hasn't changed, avoiding buffer re-copy on crosshair nav and window/level drag.
     private readonly Dictionary<SlicePlane, (int index, int vol, int rev, CenterSlice slice, BitmapSource bmp)> _cache = new();
 
-    // Per-plane DECODE cache: (slice index, volume index) → decoded slice, BEFORE
-    // windowing. A window/level drag bumps _winRev (invalidating _cache) but does not
-    // change the decode, so this lets the drag re-window the same gathered voxels
-    // without re-reading Storage. Keyed without rev; invalidated on index/vol change
-    // (overwritten per plane) and cleared on ExpandVolume.
+    // Per-plane DECODE cache: (slice index, volume index) → decoded slice, before
+    // windowing, so a window/level drag re-windows without re-decoding.
     private readonly Dictionary<SlicePlane, (int index, int vol, MiqVolume.PreparedSlice prep)> _decode = new();
 
     private bool _navDrag;   // left-drag: focus navigation
@@ -175,10 +172,8 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         _lut = lut;
         _isExpanded = true;
         _cache.Clear();   // old slices came from partial storage — discard
-        _decode.Clear();  // decoded gathers reference the old (partial) storage too
-        // Volume 0's window is valid for both partial and full storage (same
-        // voxels); keep it. Any other entries would only exist if scrubbing
-        // happened during load, which is blocked, so the cache is just [0].
+        _decode.Clear();
+        // _windowCache holds only volume 0's window, valid for the full storage too.
         InvalidateVisual();
     }
 
@@ -267,16 +262,11 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         }
         catch (Exception ex)
         {
-            // Slice decode runs HERE, on the UI thread: every scroll / click / scrub
-            // re-decodes through Slice() during the render pass. Plugin.cs wraps the
-            // cold path so a bad file shows a message instead of crashing, but that
-            // net does not extend to renders triggered by later interaction — and an
-            // exception escaping OnRender is unhandled, taking QuickLook's whole
-            // process down rather than just this preview. Report and stop drawing.
+            // Slice decode runs here on every interaction; an exception escaping
+            // OnRender would take down QuickLook's whole process. Report and stop.
             _renderFailed = true;
             var message = ex.Message;
-            // Deferred: ShowMessage mutates the visual tree, which must not happen
-            // inside a render pass.
+            // Deferred: ShowMessage mutates the visual tree, not allowed mid-render.
             Dispatcher.BeginInvoke(() =>
                 (Parent as MiqPreviewControl)?.ShowMessage(message, error: true));
         }
@@ -310,14 +300,8 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         _scrubTrackX1 = tx1;
     }
 
-    // Metadata rows for this frame, optionally with a live "Voxel value" row
-    // appended. The value is interaction-bound: shown only once the crosshair is
-    // visible (so it tracks a real focus, not the default centre), never for RGB
-    // data (no scalar value), and only when enabled. It rides the normal metadata
-    // path — no special drawing — so it inherits the panel styling and clipping.
-    // The whole panel already redraws every interaction frame, so the value simply
-    // reflects the current _focus / _volumeIndex with no separate overlay. Its
-    // position is fixed (last row), so it always sits at the end of the list.
+    // Metadata rows, plus a live "Voxel value" last row when enabled, once the
+    // crosshair is visible, and for non-RGB data.
     private IReadOnlyList<MetadataEntry> MetadataWithValue()
     {
         if (!_settings.ShowVoxelValue || !_interacted || _vol.IsRgb)
@@ -328,16 +312,9 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         return list;
     }
 
-    // Six significant digits, matching the macOS readout (and the Scaling row);
-    // integral values render with no decimal point.
-    //
-    // Non-finite values are NAMED rather than shown as a placeholder. NaN is real,
-    // meaningful data in this domain — it is how masked statistical maps, DTI
-    // metrics and registered volumes spell "no value here" — so a reader inspecting
-    // a voxel needs to know they are looking at NaN specifically, not at something
-    // the viewer declined to render. The spellings are written out literally rather
-    // than left to ToString: the invariant culture's infinity symbol differs between
-    // this plugin's net462 runtime and the net8 core.
+    // Six significant digits, matching the macOS readout. Non-finite values are
+    // named explicitly (NaN is meaningful data here, e.g. masked stat maps); the
+    // spellings are literal because the infinity symbol differs net462 vs net8.
     private static string FormatVoxelValue(float v) =>
         float.IsNaN(v) ? "NaN"
         : float.IsPositiveInfinity(v) ? "+Inf"

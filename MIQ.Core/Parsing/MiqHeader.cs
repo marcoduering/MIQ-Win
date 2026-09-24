@@ -3,10 +3,8 @@ namespace MIQ.Parsing;
 /// <summary>
 /// Format-agnostic image header. Mirrors MIQCore's <c>MIQHeader</c>.
 ///
-/// Voxels are always rendered "as stored" (reorientation is out of scope), but
-/// <see cref="OrientationFrame"/> is resolved at parse time so slices can carry
-/// correct anatomical edge labels and the metadata panel can show the
-/// storage orientation. Null when the affine is undeterminable.
+/// <see cref="OrientationFrame"/> is resolved at parse time; it drives edge
+/// labels, the reoriented view modes and the metadata panel's orientation.
 /// </summary>
 public sealed class MiqHeader
 {
@@ -30,10 +28,8 @@ public sealed class MiqHeader
     /// Overrides the display format name; set by parsers that detect compression.
     public string? FormatLabel { get; init; }
 
-    /// Overrides the datatype name shown in the metadata panel. Set when a parser
-    /// widens the stored datatype so <see cref="Datatype"/> no longer names what the
-    /// file actually holds (MIF `Bit`, unpacked to uint8 at parse time), letting the
-    /// panel report the spelling the header used. Null = use Datatype.Label().
+    /// Overrides the datatype name shown in the metadata panel when a parser widens
+    /// the stored type (MIF `Bit` → uint8). Null = use Datatype.Label().
     public string? DatatypeLabel { get; init; }
 
     /// Authoritative anatomical mapping, or null if undeterminable.

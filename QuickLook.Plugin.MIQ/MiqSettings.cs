@@ -7,13 +7,9 @@ using QuickLook.Common.Helpers;
 namespace QuickLook.Plugin.MIQ;
 
 /// <summary>
-/// User preferences from <c>MIQ.settings.ini</c>. The file lives in QuickLook's
-/// data folder (next to <c>QuickLook.config</c>), located via
-/// <see cref="SettingHelper.LocalDataPath"/> — deliberately NOT inside the
-/// plugin's own folder, which QuickLook deletes and re-extracts on every
-/// reinstall/upgrade (settings there would be lost). Using the host's data root
-/// means the file persists exactly when QuickLook's own settings do, for every
-/// deployment (installed, portable, Microsoft Store). See <see cref="Load"/>.
+/// User preferences from <c>MIQ.settings.ini</c>, in QuickLook's data folder
+/// (<see cref="SettingHelper.LocalDataPath"/>) — NOT the plugin folder, which
+/// QuickLook wipes on every reinstall/upgrade.
 ///
 /// Re-read on every preview (cheap) so edits apply on the next Space — no
 /// restart. Missing/invalid keys fall back to the default below; an
@@ -55,9 +51,7 @@ internal sealed class MiqSettings
     // ShowDisclaimer = false.
     public bool ShowDisclaimer { get; private set; } = true;
 
-    // Live "Voxel value" metadata row showing the value under the crosshair, at
-    // the end of the panel. Shown only while the user is interacting (crosshair
-    // visible) and never for RGB images. Default on; hide via ShowVoxelValue = false.
+    // Live "Voxel value" metadata row for the value under the crosshair.
     public bool ShowVoxelValue { get; private set; } = true;
 
     // View orientation: Stored renders axes as stored; Neurological/Radiological
@@ -65,15 +59,9 @@ internal sealed class MiqSettings
     // flip). Files without an OrientationFrame always fall back to Stored.
     public MiqOrientation Orientation { get; private set; } = MiqOrientation.Stored;
 
-    // Colour integer segmentation/label volumes instead of percentile-windowing
-    // them. Auto (default) detects label volumes and colours them (canonical
-    // FreeSurfer palette when the labels match a FreeSurfer parcellation, else a
-    // categorical random palette); random forces the random palette and never
-    // uses FreeSurfer colours; off keeps the legacy grayscale path for every file.
-    //
-    // The default applies to NEW installs only: any existing ini keeps the value
-    // it already carries, and one written before this key existed is migrated to
-    // an explicit "off" — see MigrateMissingKeys.
+    // Label-volume colouring (see MiqSegmentationColoring). The default applies to
+    // NEW installs only; an ini predating this key is migrated to "off" — see
+    // MigrateMissingKeys.
     public MiqSegmentationColoring Segmentation { get; private set; } = MiqSegmentationColoring.Auto;
 
     public double IntensityPercentileLow { get; private set; } = 2.0;
@@ -302,10 +290,8 @@ internal sealed class MiqSettings
         _ => "off",
     };
 
-    // The SegmentationColors block (comments + key), shared by DefaultText and the
-    // one-time migration below so they can never drift. The written value is a
-    // parameter because the two callers differ: a new file gets the current
-    // default, a migrated one gets the legacy "off" (see MigrateMissingKeys).
+    // The SegmentationColors block, shared by DefaultText and MigrateMissingKeys
+    // so they can't drift. The value is a parameter: migration writes "off".
     private static string SegmentationSettingText(MiqSegmentationColoring value) => string.Join("\r\n",
         "; Segmentation colours: off | auto | random",
         ";   auto    detect integer label volumes and colour them, canonical",
@@ -316,8 +302,7 @@ internal sealed class MiqSettings
         ";   off     percentile-window every file as grayscale.",
         $"SegmentationColors      = {SegmentationName(value)}");
 
-    // The ShowVoxelValue block (comment + key), shared by DefaultText and the
-    // migration below so they can never drift.
+    // The ShowVoxelValue block, shared by DefaultText and MigrateMissingKeys.
     private string VoxelValueSettingText() => string.Join("\r\n",
         "; Live \"Voxel value\" row at the end of the metadata panel showing the",
         "; value under the crosshair. Appears only while you interact (crosshair",
@@ -325,20 +310,13 @@ internal sealed class MiqSettings
         $"ShowVoxelValue          = {(ShowVoxelValue ? "true" : "false")}");
 
     // Append any setting added after the user's ini was first written, so an
-    // upgraded user sees the new key documented in their own file. Runs on every
-    // load but only does dictionary lookups; each block writes (once) solely when
-    // its key is genuinely absent, after which the key is present and it no-ops.
+    // upgraded user sees the new key documented in their own file.
     private void MigrateMissingKeys(string path, IReadOnlyDictionary<string, string> existing)
     {
         if (!existing.ContainsKey("SegmentationColors")) // added in 1.1
         {
-            // An ini written before this key existed belongs to an existing
-            // install, which must keep rendering exactly as it did — so pin the
-            // legacy "off" rather than inheriting the current default (auto,
-            // which is for new installs only). Assign the field too: the file we
-            // just wrote is now the truth, and this preview must already match it
-            // or the very first preview after an upgrade would differ from every
-            // one after it.
+            // Existing installs keep rendering as before: pin "off", not the new
+            // default. Assign the field too so this preview matches the file.
             Segmentation = MiqSegmentationColoring.Off;
             AppendMigrationBlock(path, SegmentationSettingText(Segmentation));
         }

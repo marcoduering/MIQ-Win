@@ -36,12 +36,9 @@ public static class IntensityWindow
         return new Bounds(windowLow, windowHigh);
     }
 
-    // Divisor for Apply. No absolute floor on the width: float data can span far
-    // less than 1e-6 (ADC maps in SI units sit around 1e-9), and the old
-    // 1e-6 floor squashed such a window into one or two grey levels. A degenerate
-    // window (High <= Low) clips every value to Low, so the numerator is 0 and any
-    // positive divisor gives black; 1 just keeps the division finite. Output is
-    // unchanged for every window >= 1e-6 (port of MIQ@d6dabd5).
+    // Divisor for Apply. No absolute floor: float data can span far less than
+    // 1e-6 (SI-unit ADC maps ~1e-9). A degenerate window (High <= Low) gives a
+    // zero numerator, so 1 just keeps the division finite.
     private static float Range(Bounds bounds)
     {
         var width = bounds.High - bounds.Low;

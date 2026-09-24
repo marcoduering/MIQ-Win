@@ -5,10 +5,8 @@ using Xunit;
 
 namespace MIQ.Tests;
 
-// Voxel spacing at render time. Port of MIQ 1.5.1's sanitizedSpacing
-// (MIQ@d6dabd5), plus the extent floor it exposed: once spacings below 1e-6
-// are no longer raised to 1e-6, ResampleTargetSize's own 1e-6 floor on the
-// reference extent starts to bite and shrinks the slice.
+// Voxel spacing at render time (MiqVolume.SanitizedSpacing) and its interaction
+// with ResampleTarget, which must apply no floor of its own.
 public class SpacingSanitizeTests
 {
     /// 8×6×5 int16 NIfTI-1 with a gradient payload and the given pixdim[1..3].

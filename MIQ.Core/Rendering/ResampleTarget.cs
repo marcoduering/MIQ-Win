@@ -5,17 +5,12 @@ namespace MIQ.Rendering;
 /// <c>ResampleTargetSize</c>.
 internal static class ResampleTarget
 {
-    /// Spacings arrive sanitized (finite, positive — see
-    /// <c>MiqVolume.SanitizedSpacing</c>), so there is no floor of any kind here.
-    /// The slice extent computed below and <paramref name="maxPhysicalExtent"/>
-    /// (computed by <c>MiqVolume.PrepareSlice</c> from the same sanitized spacings)
-    /// must treat spacing identically: a per-axis <c>max(1e-6, spacing)</c> here
-    /// alone blows small planes up (256×4×4 at 1e-9, maxDimension 512: the 4×4
-    /// plane renders 512×512 instead of 8×8), and a 1e-6 floor on the reference
-    /// extent alone shrinks every plane (131×2 instead of 512×8). Non-finite or
-    /// non-positive arithmetic — a caller passing an unsanitized spacing, or a huge
-    /// finite spacing whose extent overflows — falls back to the unscaled size
-    /// rather than guess an aspect ratio from arithmetic that has already lost it.
+    /// Spacings arrive sanitized (<c>MiqVolume.SanitizedSpacing</c>), so no floor
+    /// here. Deliberately unlike MIQCore: this extent and
+    /// <paramref name="maxPhysicalExtent"/> (from <c>PrepareSlice</c>) must treat
+    /// spacing identically, or tiny spacings blow small planes up or shrink every
+    /// plane (see SpacingSanitizeTests). Non-finite or non-positive arithmetic
+    /// falls back to the unscaled size.
     public static (int width, int height)? Size(
         int width, int height, float pixelSpacingX, float pixelSpacingY,
         float maxPhysicalExtent, int maxDimension)

@@ -185,8 +185,7 @@ internal static class WpfPreviewRenderer
             if (isVolRow)
             {
                 // Track runs inline, right of the value's reserved slot, centred on
-                // the line. Drawn for Expanded/Loadable — not while loading — and a
-                // fixed tx0 means it never shifts when the loading suffix drops off.
+                // the line. Drawn for Expanded/Loadable only.
                 const double knobR = 5;
                 var trackY = y + (textH - ScrubInlineTrackH) / 2.0;
                 var tx0 = valueX + volValueSlotW + ScrubInlineGapX;

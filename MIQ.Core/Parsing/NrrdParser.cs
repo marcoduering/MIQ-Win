@@ -90,13 +90,9 @@ public static class NrrdParser
         return (Encoding.UTF8.GetString(data, 0, headerEnd), payloadIndex);
     }
 
-    // The header ends at the *earliest* blank line (\n\n or \n\r\n). Walking
-    // newline to newline stops right there, so the payload is never scanned.
-    // A whole-file search for \r\n\r\n (tried before \n\n) used to let payload
-    // bytes win over the real separator of an LF header — two adjacent int16 LE
-    // voxels of value 2573 (0x0A0D) spell it — and scanned the entire payload.
-    // For a CRLF header the match starts one byte into \r\n\r\n, leaving a
-    // trailing \r on the header text, which the line split already drops.
+    // The header ends at the *earliest* blank line (\n\n or \n\r\n), found by
+    // walking newline to newline so payload bytes can never match first. For a
+    // CRLF header the text keeps a trailing \r, which the line split drops.
     private static (int headerEnd, int payloadIndex) FirstBlankLine(byte[] data)
     {
         var newline = Array.IndexOf(data, (byte)0x0A);
@@ -166,10 +162,8 @@ public static class NrrdParser
             throw new MiqException("NRRD header is missing required field 'type'.");
         var datatype = ParseDatatype(typeStr);
 
-        // Runs before the payload is gunzipped, so an implausible header is
-        // rejected without decompressing anything. The slice-plane guard can't run
-        // here — which axes are spatial isn't resolved until AxisLayout — so it
-        // lives in BuildMiqHeader, which both Parse and ParseHeader route through.
+        // Before gunzipping the payload. The slice-plane guard needs the spatial
+        // axes, so it lives in BuildMiqHeader.
         MiqParser.ValidateDimensionExtent(sizes, datatype.BytesPerVoxel());
 
         var endianStr = (fields.TryGetValue("endian", out var en) ? en : "little").ToLowerInvariant();
@@ -269,9 +263,8 @@ public static class NrrdParser
 
     private static MiqImage BuildImage(NrrdParsedHeader nrrd, byte[] storage, int payloadOffset)
     {
-        // Multiplies over every declared axis (unchanged semantics).
-        // ValidateDimensionExtent bounds the product; comparing against
-        // storage.Length - payloadOffset keeps the comparison overflow-free.
+        // Over every declared axis; bounded by ValidateDimensionExtent, and the
+        // subtraction keeps the comparison overflow-free.
         long totalElements = 1;
         foreach (var s in nrrd.Sizes) totalElements *= s;
         var payloadBytes = totalElements * nrrd.Datatype.BytesPerVoxel();
