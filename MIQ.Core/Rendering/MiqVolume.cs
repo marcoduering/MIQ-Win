@@ -627,6 +627,11 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
                 for (var o = p; o < end; o += 4)
                 { int v = Rd32(s, o, le); if (v != 0 && v != label) return Vol0LabelShape.MultiLabel; }
                 break;
+            case MiqDatatype.Int64:
+            case MiqDatatype.Uint64: // a uint64 above long.MaxValue reads negative: still MultiLabel
+                for (var o = p; o < end; o += 8)
+                { long v = Rd64(s, o, le); if (v != 0 && v != label) return Vol0LabelShape.MultiLabel; }
+                break;
             case MiqDatatype.Float32:
                 for (var o = p; o < end; o += 4)
                 {
@@ -674,7 +679,7 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         // Floats included: label maps are often re-saved as float by downstream
         // tools. Continuous float intensity fails the integrality check.
         MiqDatatype.Int8 or MiqDatatype.Uint8 or MiqDatatype.Int16 or MiqDatatype.Uint16
-            or MiqDatatype.Int32 or MiqDatatype.Uint32
+            or MiqDatatype.Int32 or MiqDatatype.Uint32 or MiqDatatype.Int64 or MiqDatatype.Uint64
             or MiqDatatype.Float32 or MiqDatatype.Float64 => true,
         _ => false,
     };
@@ -929,6 +934,10 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
             MiqDatatype.Uint32 => MiqBinaryReader.Uint32(s, abs, le),
             MiqDatatype.Float32 => MiqCompat.Int32BitsToSingle((int)MiqBinaryReader.Uint32(s, abs, le)),
             MiqDatatype.Float64 => (float)MiqCompat.Int64BitsToDouble((long)MiqBinaryReader.Uint64(s, abs, le)),
+            // Via double to match MIQCore's Float(Double(x)); a direct cast rounds
+            // once and can differ from it in the last bit.
+            MiqDatatype.Int64 => (float)(double)MiqBinaryReader.Int64(s, abs, le),
+            MiqDatatype.Uint64 => (float)(double)MiqBinaryReader.Uint64(s, abs, le),
             // RGB normally takes ReadRgb; luminance fallback just in case.
             MiqDatatype.Rgb24 or MiqDatatype.Rgba32 =>
                 0.299f * _image.Byte(byteOffset) + 0.587f * _image.Byte(byteOffset + 1)

@@ -388,10 +388,9 @@ public static class NrrdParser
             "float" => MiqDatatype.Float32,
             "double" => MiqDatatype.Float64,
             "int64" or "int64_t" or "longlong" or "long long"
-                or "signed long long" or "signed long long int"
-                or "uint64" or "uint64_t" or "ulonglong"
-                or "unsigned long long" or "unsigned long long int" => throw new MiqException(
-                    "NRRD 64-bit integer types are not supported; convert to float or int32 before previewing."),
+                or "signed long long" or "signed long long int" => MiqDatatype.Int64,
+            "uint64" or "uint64_t" or "ulonglong"
+                or "unsigned long long" or "unsigned long long int" => MiqDatatype.Uint64,
             _ => throw new MiqException($"Unrecognised NRRD type '{value}'."),
         };
 

@@ -408,6 +408,8 @@ public static class MifParser
             "int32"   or "int32_t"  => MiqDatatype.Int32,
             "float32"               => MiqDatatype.Float32,
             "float64"               => MiqDatatype.Float64,
+            "uint64"  or "uint64_t" => MiqDatatype.Uint64,
+            "int64"   or "int64_t"  => MiqDatatype.Int64,
             _ => throw new MiqException($"MIF: unsupported datatype '{s}'."),
         };
 
