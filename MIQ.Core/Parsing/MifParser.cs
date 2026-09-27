@@ -157,6 +157,7 @@ public static class MifParser
         };
 
         var orientationFrame = BuildOrientationFrame(transformRows, layout, order);
+        var (sclSlope, sclInter) = ParseScaling(fields);
 
         var dimensions = new int[4];
         for (var i = 0; i < 4; i++) dimensions[i] = i < storedDim.Length ? storedDim[i] : 1;
@@ -168,8 +169,8 @@ public static class MifParser
             Pixdim        = pixdim,
             Datatype      = datatype,
             VoxOffset     = payloadOffset,
-            SclSlope      = 0f,
-            SclInter      = 0f,
+            SclSlope      = sclSlope,
+            SclInter      = sclInter,
             QformCode     = 0,
             SformCode     = 0,
             SrowX         = new float[] { 0f, 0f, 0f, 0f },
@@ -230,6 +231,27 @@ public static class MifParser
             unpacked[i] = (byte)((data[payloadOffset + (i >> 3)] >> (7 - (i & 7))) & 1);
 
         return unpacked;
+    }
+
+    /// MRtrix intensity scaling, <c>scaling: offset,scale</c> (value = offset +
+    /// scale × stored; note the order is the reverse of NIfTI's slope/inter).
+    /// Written when the header carries non-identity scaling, e.g. integer data
+    /// converted from DICOM with Rescale Slope/Intercept.
+    ///
+    /// Returned as (slope, inter) in MiqHeader's convention, where slope 0 means
+    /// "unscaled". Absent, identity, malformed, non-finite, or zero-scale values
+    /// yield (0, 0): an optional field must not fail the parse, and a zero scale
+    /// would collapse the image to one value.
+    private static (float slope, float inter) ParseScaling(Dictionary<string, string> fields)
+    {
+        if (!fields.TryGetValue("scaling", out var str)) return (0f, 0f);
+        var values = TryParseFloatList(str);
+        if (values is null || values.Length != 2) return (0f, 0f);
+        var (offset, scale) = (values[0], values[1]);
+        if (!MiqCompat.IsFinite(offset) || !MiqCompat.IsFinite(scale) || scale == 0f)
+            return (0f, 0f);
+        if (scale == 1f && offset == 0f) return (0f, 0f);
+        return (scale, offset);
     }
 
     // ── Orientation ──────────────────────────────────────────────────────────

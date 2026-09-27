@@ -63,6 +63,11 @@ public static class MiqParser
         };
     }
 
+    /// Uncancellable <see cref="ParsePartial(string, CancellationToken)"/>. An
+    /// overload rather than an optional parameter so the method group still
+    /// converts to <c>Func&lt;string, MiqImage&gt;</c>.
+    public static MiqImage ParsePartial(string filePath) => ParsePartial(filePath, CancellationToken.None);
+
     /// <summary>
     /// Fast path for multi-volume NIfTI: returns just volume 0 as a partial
     /// <see cref="MiqImage"/> (<see cref="MiqImage.IsPartial"/> = true) so the
@@ -73,8 +78,10 @@ public static class MiqParser
     /// Falls back to a full <see cref="Parse"/> for 3-D / small files, or when the
     /// data is shorter than the header implies; those return a complete image
     /// (IsPartial = false).
+    /// <paramref name="ct"/> abandons the read/decompress when the user navigates
+    /// away (throws <see cref="OperationCanceledException"/>).
     /// </summary>
-    public static MiqImage ParsePartial(string filePath)
+    public static MiqImage ParsePartial(string filePath, CancellationToken ct)
     {
         var kind = MiqFileKindExtensions.FromPath(filePath)
                    ?? throw MiqException.UnsupportedFileFormat();
@@ -83,14 +90,14 @@ public static class MiqParser
         {
             var len = new FileInfo(filePath).Length;
             if (len > MaxArrayBytes)
-                return ParseNiftiFirstVolume(filePath, blocked: true);
+                return ParseNiftiFirstVolume(filePath, blocked: true, ct);
             if (len > PartialLoadThreshold)
-                return ParseNiftiFirstVolume(filePath, blocked: false);
+                return ParseNiftiFirstVolume(filePath, blocked: false, ct);
         }
 
         // Only multi-volume .nii.gz benefits; everything else parses fully.
         if (kind != MiqFileKind.NiiGz)
-            return Parse(filePath);
+            return Parse(filePath, ct);
 
         // Probe: decompress just enough to read the NIfTI header (max 1024 B;
         // NIfTI-2 header is 540 B so 1024 covers both variants with margin).
@@ -99,19 +106,19 @@ public static class MiqParser
         try
         {
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            probe = MiqBinaryReader.GunzipPartial(fs, probeSize);
+            probe = MiqBinaryReader.GunzipPartial(fs, probeSize, ct);
         }
-        catch { return Parse(filePath); }
+        catch (Exception e) when (e is not OperationCanceledException) { return Parse(filePath, ct); }
 
         if (probe.Length < 4)
-            return Parse(filePath);
+            return Parse(filePath, ct);
 
         MiqHeader header;
         try { header = NiftiParser.ParseHeader(probe, compressed: true); }
-        catch { return Parse(filePath); }
+        catch { return Parse(filePath, ct); }
 
         if (header.Volumes <= 1)
-            return Parse(filePath); // already 3-D — no benefit
+            return Parse(filePath, ct); // already 3-D — no benefit
 
         // Budget = bytes needed for header + exactly one volume.
         var budget = (long)header.VoxOffset
@@ -119,7 +126,7 @@ public static class MiqParser
                      * header.Datatype.BytesPerVoxel();
 
         if (budget > int.MaxValue)
-            return Parse(filePath); // volume 0 alone can't be held — full path reports it
+            return Parse(filePath, ct); // volume 0 alone can't be held — full path reports it
 
         // Full size from the header, NOT the gzip ISIZE footer: ISIZE is the size
         // mod 2^32, so a >4 GiB series can report a small ISIZE and be offered an
@@ -129,20 +136,20 @@ public static class MiqParser
         // Too few volumes to pay off (see PartialGzipMinVolumes) — unless the full
         // data can't fit a byte[], which must stay on the blocked vol-0 view.
         if (header.Volumes < PartialGzipMinVolumes && !blocked)
-            return Parse(filePath);
+            return Parse(filePath, ct);
 
         byte[] partial;
         try
         {
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            partial = MiqBinaryReader.GunzipPartial(fs, (int)budget);
+            partial = MiqBinaryReader.GunzipPartial(fs, (int)budget, ct);
         }
-        catch { return Parse(filePath); }
+        catch (Exception e) when (e is not OperationCanceledException) { return Parse(filePath, ct); }
 
         // Stream ended inside volume 0: the file is shorter than its header says,
         // so it is small enough for the full path, which reports the truncation.
         if (partial.Length < budget)
-            return Parse(filePath);
+            return Parse(filePath, ct);
 
         return new MiqImage
         {
@@ -174,32 +181,32 @@ public static class MiqParser
     /// <see cref="MiqImage.ExpansionBlocked"/>: true when the full data can't be
     /// held (permanent volume-0 view); false to let the viewer expand in the
     /// background (a latency optimisation for large-but-in-limit files).
-    private static MiqImage ParseNiftiFirstVolume(string filePath, bool blocked)
+    private static MiqImage ParseNiftiFirstVolume(string filePath, bool blocked, CancellationToken ct)
     {
         using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
 
         // Probe enough for either NIfTI-1 (348 B) or NIfTI-2 (540 B) header.
         var probe = new byte[1024];
-        var probed = ReadFully(fs, probe, probe.Length);
+        var probed = ReadFully(fs, probe, probe.Length, ct);
         MiqHeader header;
         try { header = NiftiParser.ParseHeader(Trim(probe, probed), compressed: false); }
-        catch { return Parse(filePath); }
+        catch { return Parse(filePath, ct); }
 
         // A single volume is assumed to always fit; if a >2 GB file claims to be
         // 3-D, fall back to the full path so it fails with a clear message.
         if (header.Volumes <= 1)
-            return Parse(filePath);
+            return Parse(filePath, ct);
 
         var budget = (long)header.VoxOffset
                      + (long)header.Width * header.Height * header.Depth
                      * header.Datatype.BytesPerVoxel();
         if (budget <= 0 || budget > MaxArrayBytes)
-            return Parse(filePath); // volume 0 itself doesn't fit — defer to full path
+            return Parse(filePath, ct); // volume 0 itself doesn't fit — defer to full path
 
         var storage = new byte[budget];
         fs.Seek(0, SeekOrigin.Begin);
-        if (ReadFully(fs, storage, storage.Length) < storage.Length)
-            return Parse(filePath); // file shorter than the header implies
+        if (ReadFully(fs, storage, storage.Length, ct) < storage.Length)
+            return Parse(filePath, ct); // file shorter than the header implies
 
         return new MiqImage
         {
@@ -213,12 +220,19 @@ public static class MiqParser
 
     /// Reads up to <paramref name="count"/> bytes into <paramref name="buf"/>,
     /// looping over short reads. Returns the number actually read (&lt; count at EOF).
-    private static int ReadFully(Stream s, byte[] buf, int count)
+    /// Reads in chunks, checking <paramref name="ct"/> between them, so a
+    /// multi-GB volume-0 read abandons promptly on nav-away.
+    private static int ReadFully(Stream s, byte[] buf, int count, CancellationToken ct)
     {
+        const int chunk = 4 * 1024 * 1024;
         var total = 0;
-        int n;
-        while (total < count && (n = s.Read(buf, total, count - total)) > 0)
+        while (total < count)
+        {
+            ct.ThrowIfCancellationRequested();
+            var n = s.Read(buf, total, Math.Min(chunk, count - total));
+            if (n <= 0) break;
             total += n;
+        }
         return total;
     }
 
