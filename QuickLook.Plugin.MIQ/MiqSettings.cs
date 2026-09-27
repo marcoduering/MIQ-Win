@@ -157,10 +157,15 @@ internal sealed class MiqSettings
             return;
         try
         {
-            File.WriteAllText(Path.Combine(pluginDir!, "MIQ settings location.txt"),
+            var breadcrumb = Path.Combine(pluginDir!, "MIQ settings location.txt");
+            var text =
                 "MIQ preview settings are stored outside this folder so they\r\n" +
                 "survive plugin updates. Edit this file:\r\n\r\n    " +
-                settingsPath + "\r\n");
+                settingsPath + "\r\n";
+            // Load() runs on every preview; write only when missing or stale
+            // (wiped by an upgrade, or the settings path moved).
+            if (File.Exists(breadcrumb) && File.ReadAllText(breadcrumb) == text) return;
+            File.WriteAllText(breadcrumb, text);
         }
         catch { /* best-effort breadcrumb */ }
     }
