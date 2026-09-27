@@ -63,6 +63,11 @@ public static class MiqParser
         };
     }
 
+    /// Uncancellable <see cref="ParsePartial(string, CancellationToken)"/>. An
+    /// overload rather than an optional parameter so the method group still
+    /// converts to <c>Func&lt;string, MiqImage&gt;</c>.
+    public static MiqImage ParsePartial(string filePath) => ParsePartial(filePath, CancellationToken.None);
+
     /// <summary>
     /// Fast path for multi-volume NIfTI: returns just volume 0 as a partial
     /// <see cref="MiqImage"/> (<see cref="MiqImage.IsPartial"/> = true) so the
@@ -70,12 +75,13 @@ public static class MiqParser
     /// <c>.nii.gz</c> (decompresses only volume 0), and to uncompressed <c>.nii</c>
     /// above <see cref="PartialLoadThreshold"/> (or <see cref="MaxArrayBytes"/>, in
     /// which case it's permanent — <see cref="MiqImage.ExpansionBlocked"/>).
-    /// Falls back to a full <see cref="Parse"/> for 3-D / small files, or when
-    /// ISIZE is unreliable; those return a complete image (IsPartial = false).
+    /// Falls back to a full <see cref="Parse"/> for 3-D / small files, or when the
+    /// data is shorter than the header implies; those return a complete image
+    /// (IsPartial = false).
     /// <paramref name="ct"/> abandons the read/decompress when the user navigates
     /// away (throws <see cref="OperationCanceledException"/>).
     /// </summary>
-    public static MiqImage ParsePartial(string filePath, CancellationToken ct = default)
+    public static MiqImage ParsePartial(string filePath, CancellationToken ct)
     {
         var kind = MiqFileKindExtensions.FromPath(filePath)
                    ?? throw MiqException.UnsupportedFileFormat();
@@ -92,10 +98,6 @@ public static class MiqParser
         // Only multi-volume .nii.gz benefits; everything else parses fully.
         if (kind != MiqFileKind.NiiGz)
             return Parse(filePath, ct);
-
-        var isize = ReadGzipIsize(filePath);
-        if (isize == 0)
-            return Parse(filePath, ct); // unknown / >4 GB — let full path handle it
 
         // Probe: decompress just enough to read the NIfTI header (max 1024 B;
         // NIfTI-2 header is 540 B so 1024 covers both variants with margin).
@@ -123,12 +125,17 @@ public static class MiqParser
                      + (long)header.Width * header.Height * header.Depth
                      * header.Datatype.BytesPerVoxel();
 
-        if (budget >= (long)isize || budget > int.MaxValue)
-            return Parse(filePath, ct); // volume 0 is the whole file
+        if (budget > int.MaxValue)
+            return Parse(filePath, ct); // volume 0 alone can't be held — full path reports it
+
+        // Full size from the header, NOT the gzip ISIZE footer: ISIZE is the size
+        // mod 2^32, so a >4 GiB series can report a small ISIZE and be offered an
+        // expansion that can never fit a byte[].
+        var blocked = NiftiFileExtent(header) > MaxArrayBytes;
 
         // Too few volumes to pay off (see PartialGzipMinVolumes) — unless the full
         // data can't fit a byte[], which must stay on the blocked vol-0 view.
-        if (header.Volumes < PartialGzipMinVolumes && isize <= (ulong)MaxArrayBytes)
+        if (header.Volumes < PartialGzipMinVolumes && !blocked)
             return Parse(filePath, ct);
 
         byte[] partial;
@@ -139,8 +146,10 @@ public static class MiqParser
         }
         catch (Exception e) when (e is not OperationCanceledException) { return Parse(filePath, ct); }
 
-        if (partial.Length < header.VoxOffset)
-            return Parse(filePath, ct); // decompression shorter than expected
+        // Stream ended inside volume 0: the file is shorter than its header says,
+        // so it is small enough for the full path, which reports the truncation.
+        if (partial.Length < budget)
+            return Parse(filePath, ct);
 
         return new MiqImage
         {
@@ -149,8 +158,20 @@ public static class MiqParser
             PayloadOffset = header.VoxOffset,
             IsPartial = true,
             // Full data won't fit a byte[] → never expand; show volume 0 + notice.
-            ExpansionBlocked = isize > (ulong)MaxArrayBytes,
+            ExpansionBlocked = blocked,
         };
+    }
+
+    /// Uncompressed NIfTI file size implied by the header: vox_offset plus every
+    /// dim[1..7] (dim[5+] also hold data) × bytes-per-voxel. ParseHeader's
+    /// ValidateDimensionExtent keeps the product within a long; the sum saturates.
+    internal static long NiftiFileExtent(MiqHeader header)
+    {
+        long payload = header.Datatype.BytesPerVoxel();
+        foreach (var d in header.Dimensions) payload *= Math.Max(1, d);
+        return payload > long.MaxValue - header.VoxOffset
+            ? long.MaxValue
+            : payload + header.VoxOffset;
     }
 
     /// Loads only volume 0 of an uncompressed multi-volume NIfTI. Reads the header,
@@ -221,20 +242,6 @@ public static class MiqParser
         var t = new byte[length];
         Array.Copy(buf, t, length);
         return t;
-    }
-
-    private static uint ReadGzipIsize(string filePath)
-    {
-        try
-        {
-            using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            if (fs.Length < 18) return 0;
-            var footer = new byte[4];
-            fs.Seek(-4, SeekOrigin.End);
-            if (fs.Read(footer, 0, 4) != 4) return 0;
-            return (uint)(footer[0] | (footer[1] << 8) | (footer[2] << 16) | (footer[3] << 24));
-        }
-        catch { return 0; }
     }
 
     /// Rejects a header whose declared voxel extent (product of every axis ×

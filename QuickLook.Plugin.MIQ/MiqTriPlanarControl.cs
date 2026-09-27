@@ -127,8 +127,10 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
             _winHigh = w.High;
         }
         // No absolute floor: a sub-1e-6 window (SI-unit ADC maps) would otherwise
-        // make one drag widen it ~1000×. A zero span makes the drag inert instead.
-        _winRefSpan = _winHigh - _winLow;
+        // make one drag widen it ~1000×. A zero span (constant volume) falls back
+        // to the value's magnitude, or 1, so right-drag still works.
+        var span = _winHigh - _winLow;
+        _winRefSpan = span > 0 ? span : Math.Max(Math.Abs(_winLow), 1.0);
 
         _perVolumeWindow = settings.PerVolumeWindow;
         // Seed the cache with volume 0's window so the first render is instant.
@@ -538,7 +540,7 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
     // sensitivity scales with the data.
     private void WindowLevelTo(Point pt)
     {
-        // Constant volume-0 data: no span to scale the drag by.
+        // Defensive: the constructor always sets a positive span for finite bounds.
         if (!(_winRefSpan > 0)) return;
         var w = Math.Max(1.0, ActualWidth);
         var h = Math.Max(1.0, ActualHeight);

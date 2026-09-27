@@ -97,8 +97,8 @@ public sealed class Plugin : IViewer
                 // when a LUT is present), and the initial slices.
                 var (lut, window, initial) = volume.CenterInteractiveState(options);
 
-                // No LUT and no window on a scalar volume: the center slices hold no
-                // finite voxel. Say so rather than render black squares (not an error).
+                // No LUT and no window on a scalar volume: volume 0 holds no finite
+                // voxel (the window falls back to a whole-volume scan). Say so rather than render black squares (not an error).
                 if (window is null && lut is null && !volume.IsRgb)
                 {
                     control.Dispatcher.BeginInvoke(() =>
