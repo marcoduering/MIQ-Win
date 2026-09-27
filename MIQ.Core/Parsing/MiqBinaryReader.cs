@@ -167,6 +167,10 @@ public static class MiqBinaryReader
     // safety margin (gzip framing only adds bytes, lowering the real ratio).
     private const long MaxDeflateExpansion = 1100;
 
+    // Largest single Read in the cancellable loops: one Read can otherwise fill a
+    // multi-GB buffer before the token is checked again.
+    private const int CancelChunk = 4 * 1024 * 1024;
+
     /// Decompress <paramref name="input"/> into a single buffer pre-sized from
     /// the gzip ISIZE — avoids the repeated MemoryStream reallocations + final
     /// ToArray copy (2–3× the decompressed size) the naive approach incurs.
@@ -183,7 +187,7 @@ public static class MiqBinaryReader
                 var total = 0;
                 int n;
                 while (total < buf.Length &&
-                       (n = gzip.Read(buf, total, buf.Length - total)) > 0)
+                       (n = gzip.Read(buf, total, Math.Min(CancelChunk, buf.Length - total))) > 0)
                 {
                     total += n;
                     ct.ThrowIfCancellationRequested(); // abandon promptly on nav-away
@@ -212,8 +216,9 @@ public static class MiqBinaryReader
 
     /// Decompress at most <paramref name="maxBytes"/> bytes from a gzip stream,
     /// stopping as soon as the buffer is full (no further input is consumed).
-    /// Returns fewer bytes when the stream ends before the limit.
-    public static byte[] GunzipPartial(Stream input, int maxBytes)
+    /// Returns fewer bytes when the stream ends before the limit. Checks
+    /// <paramref name="ct"/> before each read (abandon promptly on nav-away).
+    public static byte[] GunzipPartial(Stream input, int maxBytes, CancellationToken ct = default)
     {
         try
         {
@@ -221,9 +226,13 @@ public static class MiqBinaryReader
             using var gzip = new GZipStream(input, CompressionMode.Decompress, leaveOpen: true);
             var buf = new byte[maxBytes];
             var total = 0;
-            int n;
-            while (total < maxBytes && (n = gzip.Read(buf, total, maxBytes - total)) > 0)
+            while (total < maxBytes)
+            {
+                ct.ThrowIfCancellationRequested();
+                var n = gzip.Read(buf, total, Math.Min(CancelChunk, maxBytes - total));
+                if (n <= 0) break;
                 total += n;
+            }
             return total == maxBytes ? buf : Trim(buf, total);
         }
         catch (InvalidDataException)

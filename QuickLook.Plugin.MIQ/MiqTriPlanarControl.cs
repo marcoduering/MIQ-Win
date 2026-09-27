@@ -57,6 +57,9 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
     // through previews never triggers background work. Null once expanded/blocked.
     private readonly Action? _onExpandRequested;
     private bool _expansionRequested; // guards a single trigger; flips row to "loading…"
+    // The background load failed: volume 0 stays, the row shows a failure notice
+    // (reason in the tooltip) instead of "loading…" forever. No automatic retry.
+    private bool _expansionFailed;
 
     // Per-volume window cache (populated lazily on scrub when PerVolumeWindow = true).
     private readonly bool _perVolumeWindow;
@@ -158,6 +161,17 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         _expansionRequested = true;
         InvalidateVisual();
         _onExpandRequested!();
+    }
+
+    /// Background expansion failed (called on the UI thread). Keeps volume 0 and
+    /// replaces the "loading…" row with a failure notice; the reason goes in the
+    /// tooltip since the metadata row has no room for it.
+    internal void ExpansionFailed(string message)
+    {
+        if (_isExpanded) return;
+        _expansionFailed = true;
+        ToolTip = $"Could not load all volumes: {message}";
+        InvalidateVisual();
     }
 
     /// <summary>
@@ -289,6 +303,7 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         var mode =
             _isExpanded ? WpfPreviewRenderer.ScrubMode.Expanded :
             _expansionBlocked ? WpfPreviewRenderer.ScrubMode.Blocked :
+            _expansionFailed ? WpfPreviewRenderer.ScrubMode.Failed :
             _expansionRequested ? WpfPreviewRenderer.ScrubMode.Loading :
             _onExpandRequested != null ? WpfPreviewRenderer.ScrubMode.Loadable :
             WpfPreviewRenderer.ScrubMode.Loading;

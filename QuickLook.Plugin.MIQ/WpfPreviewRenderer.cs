@@ -93,8 +93,9 @@ internal static class WpfPreviewRenderer
     /// State of the Volumes row's scrubber. <see cref="Loadable"/> draws an
     /// interactive track but the full volume isn't loaded yet — the first scrub
     /// gesture triggers the background load (then the row shows <see cref="Loading"/>
-    /// until it expands). <see cref="Blocked"/> is the permanent volume-0-only view.
-    internal enum ScrubMode { Expanded, Loadable, Loading, Blocked }
+    /// until it expands). <see cref="Blocked"/> is the permanent volume-0-only view;
+    /// <see cref="Failed"/> is the same view after a background load error.
+    internal enum ScrubMode { Expanded, Loadable, Loading, Blocked, Failed }
 
     /// <summary>
     /// Draws metadata entries. When <paramref name="scrubVol"/> ≥ 0 and the entry
@@ -148,10 +149,14 @@ internal static class WpfPreviewRenderer
                 }
                 else
                 {
-                    // Loading the rest, or permanently blocked (too large) — vol 0 only.
-                    var valStr = scrubMode == ScrubMode.Blocked
-                        ? $"1 / {scrubTotal}  ·  first volume only (too large for 4-D)"
-                        : $"{scrubVol + 1} / {scrubTotal}  loading…";
+                    // Loading the rest, permanently blocked (too large), or the load
+                    // failed — vol 0 only.
+                    var valStr = scrubMode switch
+                    {
+                        ScrubMode.Blocked => $"1 / {scrubTotal}  ·  first volume only (too large for 4-D)",
+                        ScrubMode.Failed => $"1 / {scrubTotal}  ·  first volume only (full load failed)",
+                        _ => $"{scrubVol + 1} / {scrubTotal}  loading…",
+                    };
                     values[i] = Text(valStr, s.MetadataLabelBrush, fs * 0.9, Regular);
                 }
             }

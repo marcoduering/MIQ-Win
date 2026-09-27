@@ -86,8 +86,9 @@ public sealed class Plugin : IViewer
                 var kind = MiqFileKindExtensions.FromPath(path);
 
                 // Phase 1: volume-0-only load where it pays off (see ParsePartial);
-                // otherwise a full parse (IsPartial = false).
-                var image = MiqParser.ParsePartial(path);
+                // otherwise a full parse (IsPartial = false). The token abandons the
+                // read/decompress if the user navigates away mid-load.
+                var image = MiqParser.ParsePartial(path, cts.Token);
                 if (cts.IsCancellationRequested) return;
 
                 var fmt = image.Header.FormatLabel ?? kind?.DisplayName() ?? "Unknown";
@@ -137,6 +138,10 @@ public sealed class Plugin : IViewer
                     context.IsBusy = false;
                 });
             }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+                // Navigated away mid-load: nothing to show.
+            }
             catch (Exception ex)
             {
                 control.Dispatcher.BeginInvoke(() =>
@@ -178,7 +183,21 @@ public sealed class Plugin : IViewer
                     view.ExpandVolume(fullVolume, fullLut);
                 });
             }
-            catch (Exception) { /* cancelled, or viewer cleaned up */ }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                // Navigated away mid-load: nothing to report.
+            }
+            catch (Exception ex)
+            {
+                // A real failure (out of memory, I/O error, file changed): tell the
+                // view so it leaves "loading…" for the volume-0-only notice.
+                var message = ex.Message;
+                control.Dispatcher.BeginInvoke(() =>
+                {
+                    if (token.IsCancellationRequested) return;
+                    view.ExpansionFailed(message);
+                });
+            }
             finally { thread.Priority = prevPriority; }
         });
     }
