@@ -26,6 +26,9 @@ public sealed class Plugin : IViewer
     private MiqVolume? _volume;
     // Cancelled in Cleanup() so background tasks don't touch a recycled viewer.
     private CancellationTokenSource? _cts;
+    // Loaded once per preview in Prepare() and reused by View(), so the ini is
+    // read (and its breadcrumb checked) once per Space, not twice.
+    private MiqSettings? _settings;
 
     // Above QuickLook's generic ArchiveViewer, which otherwise grabs ".gz".
     public int Priority => 100;
@@ -59,7 +62,9 @@ public sealed class Plugin : IViewer
 
     public void Prepare(string path, ContextObject context)
     {
+        // Re-read every preview so ini edits apply on the next Space.
         var settings = MiqSettings.Load();
+        _settings = settings;
         context.PreferredSize = new WpfSize(settings.PreviewWidth, settings.PreviewHeight);
         context.Theme = Themes.Dark;
     }
@@ -76,12 +81,14 @@ public sealed class Plugin : IViewer
         context.ViewerContent = _control;
 
         var control = _control;
+        // Frozen WPF resources only, so safe to hand to the background task.
+        // Load here only if the host skipped Prepare().
+        var loaded = _settings;
         Task.Run(() =>
         {
             try
             {
-                // Re-read every preview so ini edits apply on the next Space.
-                var settings = MiqSettings.Load();
+                var settings = loaded ?? MiqSettings.Load();
                 var options = settings.Options;
                 var kind = MiqFileKindExtensions.FromPath(path);
 
