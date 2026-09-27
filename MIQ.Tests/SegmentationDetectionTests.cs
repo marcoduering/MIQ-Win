@@ -232,4 +232,59 @@ public class SegmentationDetectionTests
             SegmentationLut.MaxLabels = original;
         }
     }
+
+    // ── Foreground outside the three center slices (x, y, z = 24 of 48) ─────
+    // The center sample is pure background, so detection and windowing must look
+    // at the whole volume; before, every slice rendered black.
+
+    static readonly MiqRenderingOptions Off = new(Segmentation: MiqSegmentationColoring.Off);
+
+    static bool InCorner(int x, int y, int z) => x is >= 2 and <= 5 && y is >= 2 and <= 5 && z is >= 2 and <= 5;
+
+    [Fact]
+    public void OffCenterBinaryMask_Auto_RendersMonochromeWhite()
+    {
+        var vol = MakeVolume(48, 48, 48, (x, y, z) => InCorner(x, y, z) ? 1 : 0);
+        var (lut, window, _) = vol.CenterInteractiveState(Auto);
+        Assert.NotNull(lut);
+        Assert.True(lut!.IsMonochromeWhite);
+        Assert.Null(window);
+        Assert.True(vol.BuildSegmentationLut(Auto)!.IsMonochromeWhite); // expansion path agrees
+    }
+
+    [Fact]
+    public void OffCenterMultiLabel_Auto_GetsColourLut()
+    {
+        var vol = MakeVolume(48, 48, 48, (x, y, z) =>
+            InCorner(x, y, z) ? 3 : x >= 40 && y >= 40 && z >= 40 ? 7 : 0);
+        var lut = vol.CenterInteractiveState(Auto).Lut;
+        Assert.NotNull(lut);
+        Assert.False(lut!.IsMonochromeWhite);
+    }
+
+    [Fact]
+    public void OffCenterMask_Off_WindowSpansBackgroundToLabel()
+    {
+        var vol = MakeVolume(48, 48, 48, (x, y, z) => InCorner(x, y, z) ? 1 : 0);
+        var (lut, window, _) = vol.CenterInteractiveState(Off);
+        Assert.Null(lut);
+        Assert.NotNull(window);
+        Assert.Equal(0f, window!.Value.Low);
+        Assert.Equal(1f, window.Value.High);
+
+        // Scrolled onto the mask, its voxels are visible, not black.
+        var slice = vol.ExtractSlice(SlicePlane.Axial, 3, window);
+        Assert.Contains((byte)255, slice.Image.Grayscale!.Pixels);
+        Assert.Equal(window.Value.High, vol.SharedWindow(Off)!.Value.High); // per-volume path agrees
+    }
+
+    [Fact]
+    public void AllZeroVolume_StaysDegenerate()
+    {
+        var vol = MakeVolume(16, 16, 16, (_, _, _) => 0);
+        Assert.Null(vol.CenterInteractiveState(Auto).Lut);
+        var window = vol.CenterInteractiveState(Off).Window;
+        Assert.NotNull(window);
+        Assert.Equal(window!.Value.Low, window.Value.High);
+    }
 }

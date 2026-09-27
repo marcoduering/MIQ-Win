@@ -176,20 +176,12 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
             () => prepared[2] = PrepareSlice(planes[2]));
 
         // Label detection reuses the prepared gray arrays — no extra decode.
-        SegmentationLut? lut = null;
-        if (SegmentationEligible(options) && CollectLabels(prepared) is { } labels
-            && (IsPiecewiseConstant(prepared) ?? true))
-            lut = FinishSegmentationLut(labels, options);
+        var lut = DetectSegmentationLut(prepared, options);
 
         // Label volumes map through the LUT, not the intensity window.
         IntensityWindow.Bounds? window = null;
         if (lut is null)
-        {
-            var pooled = new List<float>();
-            foreach (var p in prepared)
-                if (p.Gray is { } g) pooled.AddRange(g); // RGB slices bypass pooling
-            window = IntensityWindow.GetBounds(pooled, options.LowerPercentile, options.UpperPercentile);
-        }
+            window = WindowFromSlices(prepared, options, timepoint: 0);
 
         var result = new Dictionary<SlicePlane, CenterSlice>();
         for (var i = 0; i < planes.Length; i++)
@@ -284,10 +276,70 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
     /// other than 0 to compute the window for a specific 4-D volume.
     public IntensityWindow.Bounds? SharedWindow(MiqRenderingOptions options, int timepoint = 0)
     {
+        var prepared = new[]
+        {
+            PrepareSlice(SlicePlane.Coronal, timepoint: timepoint),
+            PrepareSlice(SlicePlane.Sagittal, timepoint: timepoint),
+            PrepareSlice(SlicePlane.Axial, timepoint: timepoint),
+        };
+        return WindowFromSlices(prepared, options, timepoint);
+    }
+
+    // Pooled center-slice window. When the center slices hold no finite value, or
+    // only one value (e.g. a mask whose foreground lies elsewhere), that window is
+    // null or degenerate and would render every slice black; fall back to a
+    // window over the whole volume at this timepoint.
+    private IntensityWindow.Bounds? WindowFromSlices(
+        PreparedSlice[] prepared, MiqRenderingOptions options, int timepoint)
+    {
         var pooled = new List<float>();
-        foreach (var plane in new[] { SlicePlane.Coronal, SlicePlane.Sagittal, SlicePlane.Axial })
-            if (PrepareSlice(plane, timepoint: timepoint).Gray is { } g) pooled.AddRange(g);
-        return IntensityWindow.GetBounds(pooled, options.LowerPercentile, options.UpperPercentile);
+        foreach (var p in prepared)
+            if (p.Gray is { } g) pooled.AddRange(g); // RGB slices bypass pooling
+        var window = IntensityWindow.GetBounds(pooled, options.LowerPercentile, options.UpperPercentile);
+        if (window is { } w && w.High > w.Low) return window;
+        if (pooled.Count == 0) return window; // RGB: no intensity window
+
+        float? constant = window is { } d ? d.Low : null;
+        return VolumeWindow(options, timepoint, constant) ?? window;
+    }
+
+    // Upper bound on voxels VolumeWindow sorts; larger sets are strided evenly.
+    private const long MaxVolumeWindowSamples = 1_000_000;
+
+    // Window over every voxel of one timepoint. With a <paramref name="constant"/>
+    // (the value the center slices were filled with) only the other values are
+    // sampled, then the window is widened to include the constant, so a sparse
+    // mask on a zero background maps to [0, label]. Returns null when nothing
+    // (else) finite is present. Two passes: count, then an evenly strided sample.
+    private IntensityWindow.Bounds? VolumeWindow(
+        MiqRenderingOptions options, int timepoint, float? constant)
+    {
+        bool Keep(float v) => MiqCompat.IsFinite(v) && (constant is not { } c || v != c);
+
+        long count = 0;
+        for (var z = 0; z < Depth; z++)
+            for (var y = 0; y < Height; y++)
+                for (var x = 0; x < Width; x++)
+                    if (Keep(Voxel(x, y, z, timepoint))) count++;
+        if (count == 0) return null;
+
+        var stride = (count + MaxVolumeWindowSamples - 1) / MaxVolumeWindowSamples;
+        var samples = new List<float>((int)Math.Min(count, MaxVolumeWindowSamples));
+        long seen = 0;
+        for (var z = 0; z < Depth; z++)
+            for (var y = 0; y < Height; y++)
+                for (var x = 0; x < Width; x++)
+                {
+                    var v = Voxel(x, y, z, timepoint);
+                    if (Keep(v) && seen++ % stride == 0) samples.Add(v);
+                }
+
+        if (IntensityWindow.GetBounds(samples, options.LowerPercentile, options.UpperPercentile)
+            is not { } b)
+            return null;
+        return constant is { } k
+            ? new IntensityWindow.Bounds(Math.Min(b.Low, k), Math.Max(b.High, k))
+            : b;
     }
 
     /// Extract a single slice at an arbitrary index using a precomputed window
@@ -333,9 +385,63 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
             PrepareSlice(SlicePlane.Sagittal),
             PrepareSlice(SlicePlane.Axial),
         };
+        return DetectSegmentationLut(prepared, options);
+    }
+
+    // Shared by BuildSegmentationLut and CenterInteractiveState so the initial
+    // and post-expansion LUTs are decided identically.
+    private SegmentationLut? DetectSegmentationLut(PreparedSlice[] prepared, MiqRenderingOptions options)
+    {
+        if (!SegmentationEligible(options)) return null;
         if (CollectLabels(prepared) is not { } labels) return null;
+
+        // Center slices are pure background (a lesion or single-ROI mask often
+        // misses all three): no evidence either way, so collect from all of
+        // volume 0 instead of falling back to a window of zeros.
+        if (labels.Count == 0)
+            return CollectVolume0Labels() is { Count: > 0 } all
+                ? FinishSegmentationLut(all, options, volume0Scanned: true)
+                : null;
+
         if (!(IsPiecewiseConstant(prepared) ?? true)) return null;
         return FinishSegmentationLut(labels, options);
+    }
+
+    // Distinct foreground labels over ALL of volume 0 (present even on partial
+    // loads). Null on the first fractional value or once more than MaxLabels
+    // distinct values are seen, mirroring CollectLabels. Only reached when the
+    // center slices are all background, so a real label volume is sparse here.
+    // Eligibility guarantees identity scaling, so raw values are the labels.
+    private HashSet<int>? CollectVolume0Labels()
+    {
+        var labels = new HashSet<int>();
+        bool Add(float v)
+        {
+            if (!MiqCompat.IsFinite(v)) return true;
+            var label = MiqCompat.RoundToInt(v);
+            if (Math.Abs(v - label) > 1e-3f) return false;          // fractional → intensity
+            return !(labels.Add(label) && labels.Count > SegmentationLut.MaxLabels);
+        }
+
+        if (_image.ElementStrides is not null)
+        {
+            // MIF custom strides may interleave volumes: per-voxel walk.
+            for (var z = 0; z < Depth; z++)
+                for (var y = 0; y < Height; y++)
+                    for (var x = 0; x < Width; x++)
+                        if (!Add(Voxel(x, y, z, 0))) return null;
+        }
+        else
+        {
+            // Row-major: volume 0 is the first W·H·D payload elements.
+            var bpv = H.Datatype.BytesPerVoxel();
+            var elems = (int)Math.Min((long)Width * Height * Depth, (long)_image.PayloadCount / bpv);
+            for (var i = 0; i < elems; i++)
+                if (!Add(RawVoxelValue(i * bpv))) return null;
+        }
+
+        labels.Remove(0);
+        return labels;
     }
 
     // Cheap, no-decode eligibility gate: integer/float identity-scaled data in a
@@ -431,9 +537,15 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
     // single-label sample is confirmed against all of volume 0 before committing
     // to the (sticky) monochrome LUT. Multi-label volumes get the FreeSurfer
     // palette (Auto only) or the random palette.
-    private SegmentationLut? FinishSegmentationLut(HashSet<int> labels, MiqRenderingOptions options)
+    // volume0Scanned: the labels already came from all of volume 0, so a single
+    // label is a confirmed binary mask and needs no second scan.
+    private SegmentationLut? FinishSegmentationLut(
+        HashSet<int> labels, MiqRenderingOptions options, bool volume0Scanned = false)
     {
         if (labels.Count == 0) return null;
+
+        if (labels.Count == 1 && volume0Scanned)
+            return new SegmentationLut(useFreeSurfer: false, monochromeWhite: true);
 
         if (labels.Count == 1)
         {
