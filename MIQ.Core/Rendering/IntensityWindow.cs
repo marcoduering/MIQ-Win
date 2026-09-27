@@ -10,6 +10,10 @@ public static class IntensityWindow
         public float High { get; } = high;
     }
 
+    /// Magnitude at or below which a value counts as background for the preferred
+    /// foreground subset (see <see cref="GetBounds"/>).
+    internal const float NonZeroFloor = 1e-6f;
+
     /// Derives window bounds from a pooled value set. Returns null if no finite
     /// values are present.
     public static Bounds? GetBounds(IReadOnlyList<float> values, double lowerPercentile, double upperPercentile)
@@ -19,12 +23,39 @@ public static class IntensityWindow
             if (MiqCompat.IsFinite(v)) finite.Add(v);
         if (finite.Count == 0) return null;
 
-        // Prefer a non-zero subset if substantial; the /20 ratio guards against
-        // rejecting legitimate dim regions when most voxels are background.
-        var nonZero = new List<float>(finite.Count);
+        // Window over the foreground when it's substantial; the /20 ratio keeps a
+        // dim region from being rejected when most voxels are background.
+        //
+        // Two tiers, tried in order. The NonZeroFloor also drops near-zero
+        // interpolation residue, and wins whenever it leaves enough voxels (every
+        // ordinary image, unchanged from before). Only when it doesn't (data in
+        // tiny units: an SI-unit ADC map sits around 1e-9, entirely below the
+        // floor) do exactly-non-zero values stand in, so such a map windows over
+        // its tissue instead of over tissue plus background zeros. Deliberately
+        // not a floor scaled by the data's maximum: one outlier voxel (1e30 from a
+        // failed fit) would lift that above real tissue. Port of MIQCore's bounds.
+        var minimumSubset = Math.Max(64, finite.Count / 20);
+        var aboveFloor = new List<float>(finite.Count);
+        var nonZeroCount = 0;
         foreach (var v in finite)
-            if (Math.Abs(v) > 1e-6f) nonZero.Add(v);
-        var source = nonZero.Count >= Math.Max(64, finite.Count / 20) ? nonZero : finite;
+        {
+            if (v == 0f) continue;
+            nonZeroCount++;
+            if (Math.Abs(v) > NonZeroFloor) aboveFloor.Add(v);
+        }
+
+        List<float> source;
+        if (aboveFloor.Count >= minimumSubset)
+            source = aboveFloor;
+        else if (nonZeroCount >= minimumSubset)
+        {
+            // Tiny-unit fallback: the only case that pays a second pass.
+            source = new List<float>(nonZeroCount);
+            foreach (var v in finite)
+                if (v != 0f) source.Add(v);
+        }
+        else
+            source = finite;
         source.Sort();
 
         var lower = Percentile(source, (float)lowerPercentile / 100f);
