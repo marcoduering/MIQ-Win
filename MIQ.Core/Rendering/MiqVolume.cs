@@ -423,9 +423,9 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
             return !(labels.Add(label) && labels.Count > SegmentationLut.MaxLabels);
         }
 
-        if (_image.ElementStrides is not null)
+        if (!Volume0IsContiguous)
         {
-            // MIF custom strides may interleave volumes: per-voxel walk.
+            // Volumes interleaved with space: per-voxel walk.
             for (var z = 0; z < Depth; z++)
                 for (var y = 0; y < Height; y++)
                     for (var x = 0; x < Width; x++)
@@ -433,7 +433,7 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         }
         else
         {
-            // Row-major: volume 0 is the first W·H·D payload elements.
+            // Volume 0 is the first W·H·D payload elements (order is irrelevant here).
             var bpv = H.Datatype.BytesPerVoxel();
             var elems = (int)Math.Min((long)Width * Height * Depth, (long)_image.PayloadCount / bpv);
             for (var i = 0; i < elems; i++)
@@ -579,11 +579,11 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
     // binary mask scans to completion.
     private Vol0LabelShape ScanVolume0(int label)
     {
-        // MIF custom strides may interleave volumes: use the per-voxel walk.
-        if (_image.ElementStrides is not null)
+        // A layout that interleaves volumes with space: use the per-voxel walk.
+        if (!Volume0IsContiguous)
             return ScanVolume0PerVoxel(label);
 
-        // Row-major formats: volume 0 is the first N payload elements. Only which
+        // Volume 0 is the first N payload elements, in some order. Only which
         // values occur matters, not where, so scan the raw buffer sequentially with
         // the datatype switch hoisted out of the loop.
         var s = _image.Storage;
@@ -627,6 +627,11 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
                 for (var o = p; o < end; o += 4)
                 { int v = Rd32(s, o, le); if (v != 0 && v != label) return Vol0LabelShape.MultiLabel; }
                 break;
+            case MiqDatatype.Int64:
+            case MiqDatatype.Uint64: // a uint64 above long.MaxValue reads negative: still MultiLabel
+                for (var o = p; o < end; o += 8)
+                { long v = Rd64(s, o, le); if (v != 0 && v != label) return Vol0LabelShape.MultiLabel; }
+                break;
             case MiqDatatype.Float32:
                 for (var o = p; o < end; o += 4)
                 {
@@ -653,7 +658,35 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         return Vol0LabelShape.Binary;
     }
 
-    // Layout-agnostic fallback for MIF custom strides.
+    /// Whether volume 0 occupies exactly the first W·H·D payload elements, in any
+    /// order. The volume-0 label scans don't depend on voxel order, so this (not
+    /// the absence of custom strides) is what their contiguous path needs.
+    ///
+    /// True for row-major layouts and for every dense permuted one: the spatial
+    /// strides sorted ascending are 1, d₀, d₀·d₁. MifParser sets ElementStrides
+    /// even for an identity layout, so keying off null sent every MIF mask down
+    /// the per-voxel walk. The time stride never matters: volume 0 is t = 0. A
+    /// layout with the volume axis faster than a spatial one fails the check, as
+    /// it must, since its first N elements mix timepoints. Internal so tests can
+    /// pin which path a layout takes. Port of MIQCore's volumeZeroIsContiguous.
+    internal bool Volume0IsContiguous
+    {
+        get
+        {
+            if (_image.ElementStrides is not { } s) return true;
+            if (s.Length < 3 || _image.BaseElementIndex != 0) return false;
+            // Ties (a size-1 axis shares its stride with the next) sort by size so
+            // the size-1 axis comes first and the check still holds. A mis-ordered
+            // tie would only cost the fast path, never correctness.
+            var axes = new[] { (stride: s[0], size: Width), (stride: s[1], size: Height), (stride: s[2], size: Depth) };
+            Array.Sort(axes, (a, b) => a.stride != b.stride ? a.stride.CompareTo(b.stride) : a.size.CompareTo(b.size));
+            return axes[0].stride == 1
+                && axes[1].stride == axes[0].size
+                && axes[2].stride == (long)axes[0].size * axes[1].size;
+        }
+    }
+
+    // Layout-agnostic fallback for layouts that interleave volumes with space.
     private Vol0LabelShape ScanVolume0PerVoxel(int label)
     {
         for (var z = 0; z < Depth; z++)
@@ -674,7 +707,7 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
         // Floats included: label maps are often re-saved as float by downstream
         // tools. Continuous float intensity fails the integrality check.
         MiqDatatype.Int8 or MiqDatatype.Uint8 or MiqDatatype.Int16 or MiqDatatype.Uint16
-            or MiqDatatype.Int32 or MiqDatatype.Uint32
+            or MiqDatatype.Int32 or MiqDatatype.Uint32 or MiqDatatype.Int64 or MiqDatatype.Uint64
             or MiqDatatype.Float32 or MiqDatatype.Float64 => true,
         _ => false,
     };
@@ -929,6 +962,10 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
             MiqDatatype.Uint32 => MiqBinaryReader.Uint32(s, abs, le),
             MiqDatatype.Float32 => MiqCompat.Int32BitsToSingle((int)MiqBinaryReader.Uint32(s, abs, le)),
             MiqDatatype.Float64 => (float)MiqCompat.Int64BitsToDouble((long)MiqBinaryReader.Uint64(s, abs, le)),
+            // Via double to match MIQCore's Float(Double(x)); a direct cast rounds
+            // once and can differ from it in the last bit.
+            MiqDatatype.Int64 => (float)(double)MiqBinaryReader.Int64(s, abs, le),
+            MiqDatatype.Uint64 => (float)(double)MiqBinaryReader.Uint64(s, abs, le),
             // RGB normally takes ReadRgb; luminance fallback just in case.
             MiqDatatype.Rgb24 or MiqDatatype.Rgba32 =>
                 0.299f * _image.Byte(byteOffset) + 0.587f * _image.Byte(byteOffset + 1)
