@@ -38,9 +38,11 @@ public static class MiqParser
     /// Optional faster gzip decompressor. Given the file path, returns the
     /// fully-decompressed bytes. The QuickLook plugin sets this to a native
     /// libdeflate implementation (.NET Framework's built-in gzip is far slower).
-    /// When null, the built-in streaming path is used.
+    /// When null, the built-in streaming path is used. Implementations should
+    /// honour the token while reading the file — on a network share the read,
+    /// not the decompress, is what outlives a nav-away.
     /// </summary>
-    public static Func<string, byte[]>? GzipDecompressorOverride;
+    public static Func<string, CancellationToken, byte[]>? GzipDecompressorOverride;
 
     /// Parses a file fully. Pass a <paramref name="ct"/> for background loads
     /// (e.g. volume expansion) so a slow read/decompress abandons promptly when
@@ -296,12 +298,12 @@ public static class MiqParser
             return ReadAllBytes(filePath, (int)fileLen, ct);
         }
 
-        // Native libdeflate is a single uninterruptible call, but fast (GB/s);
-        // only the cancellation check before it is meaningful.
+        // Native libdeflate is a single uninterruptible call, but fast (GB/s); the
+        // override reads the compressed file in cancellable chunks before it.
         if (GzipDecompressorOverride is { } fast)
         {
             ct.ThrowIfCancellationRequested();
-            return fast(filePath);
+            return fast(filePath, ct);
         }
 
         // Stream straight from disk: don't hold the whole compressed file in
@@ -332,7 +334,7 @@ public static class MiqParser
     /// Reads a whole file into a byte[], checking <paramref name="ct"/> between
     /// chunks so a background load abandons promptly on nav-away instead of
     /// blocking the next preview. Caller guarantees length fits a byte[].
-    private static byte[] ReadAllBytes(string filePath, int length, CancellationToken ct)
+    internal static byte[] ReadAllBytes(string filePath, int length, CancellationToken ct)
     {
         var buf = new byte[length];
         using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);

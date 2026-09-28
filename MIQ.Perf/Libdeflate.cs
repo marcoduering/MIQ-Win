@@ -40,7 +40,7 @@ internal static class Libdeflate
     }
 
     // Assigned to MiqParser.GzipDecompressorOverride.
-    internal static byte[] Decompress(string path)
+    internal static byte[] Decompress(string path, CancellationToken ct)
     {
         var input = File.ReadAllBytes(path);
         return DecompressBuffer(input) ?? ManagedGunzip(input);

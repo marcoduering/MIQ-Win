@@ -1,6 +1,7 @@
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using MIQ.Parsing;
 
 namespace QuickLook.Plugin.MIQ;
@@ -42,9 +43,15 @@ internal static class LibdeflateGzip
     }
 
     /// Whole-file decompressor for path-based <see cref="MiqParser.GzipDecompressorOverride"/>.
-    internal static byte[] Decompress(string path)
+    /// The compressed read is chunked and checks <paramref name="ct"/> between
+    /// chunks, so a large file on a network share stops downloading on nav-away
+    /// instead of holding up the next preview's reads.
+    internal static byte[] Decompress(string path, CancellationToken ct)
     {
-        var input = File.ReadAllBytes(path);
+        var length = new FileInfo(path).Length;
+        var input = length <= MiqParser.MaxArrayBytes
+            ? MiqParser.ReadAllBytes(path, (int)length, ct)
+            : File.ReadAllBytes(path); // >2 GB: surfaces the BCL limit message
         // Managed fallback handles the rare multi-member / odd-ISIZE / >4 GB cases.
         return DecompressBuffer(input) ?? MiqBinaryReader.GunzipManaged(input);
     }
