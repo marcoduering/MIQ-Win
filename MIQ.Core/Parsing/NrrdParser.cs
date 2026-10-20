@@ -28,8 +28,9 @@ public static class NrrdParser
         /// Null array = field absent entirely.
         public float[]?[]? SpaceDirections { get; init; }
         public float[]? SpaceOrigin { get; init; }
-        /// Multipliers converting NRRD (x,y,z) components to RAS (R,A,S).
-        public required (float rx, float ry, float rz) ToRasSigns { get; init; }
+        /// Multipliers converting NRRD (x,y,z) components to RAS (R,A,S);
+        /// null when `space` is absent or not anatomical (scanner-xyz, 3D-…-handed).
+        public (float rx, float ry, float rz)? ToRasSigns { get; init; }
         /// Fallback voxel spacings when SpaceDirections is absent.
         public float[]? Spacings { get; init; }
     }
@@ -233,12 +234,9 @@ public static class NrrdParser
         var computedStrides = new[] { xStride, yStride, zStride, tStride };
         var customStrides = computedStrides.SequenceEqual(defaultStrides) ? null : computedStrides;
 
-        var (pixX, pixY, pixZ, srowX, srowY, srowZ) = Affine(nrrd, spatialAxes);
-        var hasSform = srowX.Take(3).Any(v => v != 0f)
-                       || srowY.Take(3).Any(v => v != 0f)
-                       || srowZ.Take(3).Any(v => v != 0f);
+        var (pixX, pixY, pixZ, srowX, srowY, srowZ, hasAffine) = Affine(nrrd, spatialAxes);
 
-        var orientationFrame = hasSform ? OrientationFrame.From(srowX, srowY, srowZ) : null;
+        var orientationFrame = hasAffine ? OrientationFrame.From(srowX, srowY, srowZ) : null;
 
         var header = new MiqHeader
         {
@@ -250,7 +248,7 @@ public static class NrrdParser
             SclSlope = 1f,
             SclInter = 0f,
             QformCode = 0,
-            SformCode = hasSform ? 1 : 0,
+            SformCode = orientationFrame != null ? 1 : 0,
             SrowX = srowX,
             SrowY = srowY,
             SrowZ = srowZ,
@@ -316,11 +314,9 @@ public static class NrrdParser
 
     // ── Affine ───────────────────────────────────────────────────────────────
 
-    private static (float pixX, float pixY, float pixZ, float[] srowX, float[] srowY, float[] srowZ)
+    private static (float pixX, float pixY, float pixZ, float[] srowX, float[] srowY, float[] srowZ, bool hasAffine)
         Affine(NrrdParsedHeader nrrd, int[] spatialAxes)
     {
-        var (rx, ry, rz) = nrrd.ToRasSigns;
-
         if (nrrd.SpaceDirections is { } dirs)
         {
             var v0 = dirs[spatialAxes[0]] ?? new[] { 1f, 0f, 0f };
@@ -330,6 +326,12 @@ public static class NrrdParser
             var pixX = (float)Math.Sqrt(v0[0] * v0[0] + v0[1] * v0[1] + v0[2] * v0[2]);
             var pixY = (float)Math.Sqrt(v1[0] * v1[0] + v1[1] * v1[1] + v1[2] * v1[2]);
             var pixZ = (float)Math.Sqrt(v2[0] * v2[0] + v2[1] * v2[1] + v2[2] * v2[2]);
+
+            // Directions without an anatomical space say nothing about which side
+            // is which: keep the spacing, build no affine (falls back to stored).
+            if (nrrd.ToRasSigns is not { } signs)
+                return (pixX, pixY, pixZ, new float[4], new float[4], new float[4], false);
+            var (rx, ry, rz) = signs;
 
             var ox = Safe(nrrd.SpaceOrigin, 0) * rx;
             var oy = Safe(nrrd.SpaceOrigin, 1) * ry;
@@ -341,25 +343,35 @@ public static class NrrdParser
             var srowY = new[] { v0[1] * ry, v1[1] * ry, v2[1] * ry, oy };
             var srowZ = new[] { v0[2] * rz, v1[2] * rz, v2[2] * rz, oz };
 
-            return (pixX, pixY, pixZ, srowX, srowY, srowZ);
+            return (pixX, pixY, pixZ, srowX, srowY, srowZ, true);
         }
 
-        // Fallback: use spacings if available, identity orientation.
+        // Fallback: spacings only — no directions means no orientation, whatever
+        // `space` says, so keep the spacing and build no affine (falls back to stored).
         var px = Math.Abs(SafeOr(nrrd.Spacings, spatialAxes[0], 1f));
         var py = Math.Abs(SafeOr(nrrd.Spacings, spatialAxes[1], 1f));
         var pz = Math.Abs(SafeOr(nrrd.Spacings, spatialAxes[2], 1f));
 
-        return (px, py, pz,
-            new[] { px * rx, 0f, 0f, 0f },
-            new[] { 0f, py * ry, 0f, 0f },
-            new[] { 0f, 0f, pz * rz, 0f });
+        return (px, py, pz, new float[4], new float[4], new float[4], false);
     }
 
     private static float Safe(float[]? a, int i) => a != null && i < a.Length ? a[i] : 0f;
     private static float SafeOr(float[]? a, int i, float fallback) =>
         a != null && i < a.Length ? a[i] : fallback;
 
-    private static (float rx, float ry, float rz) SpaceToRasSigns(string? space) => space switch
+    private static (float rx, float ry, float rz)? SpaceToRasSigns(string? space)
+    {
+        if (space == null) return null;
+        // The "-time" spaces (RAST, LPST, …) add a temporal world axis after the
+        // three anatomical ones, which keep their meaning.
+        if (space.EndsWith("-time", StringComparison.Ordinal))
+            space = space.Substring(0, space.Length - 5);
+        else if (space.Length == 4 && space.EndsWith("t", StringComparison.Ordinal))
+            space = space.Substring(0, 3);
+        return AnatomicalSpaceSigns(space);
+    }
+
+    private static (float rx, float ry, float rz)? AnatomicalSpaceSigns(string space) => space switch
     {
         "right-anterior-superior" or "ras" => (1, 1, 1),
         "left-anterior-superior" or "las" => (-1, 1, 1),
@@ -369,7 +381,7 @@ public static class NrrdParser
         "left-anterior-inferior" or "lai" => (-1, 1, -1),
         "left-posterior-inferior" or "lpi" => (-1, -1, -1),
         "right-posterior-inferior" or "rpi" => (1, -1, -1),
-        _ => (1, 1, 1),
+        _ => null,
     };
 
     // ── Field value parsers ──────────────────────────────────────────────────
@@ -433,7 +445,7 @@ public static class NrrdParser
             }
             else if (TryParseParenthesisedFloats(cursor, out var components, out var consumed))
             {
-                result.Add(components.Length == 3 ? components : null);
+                result.Add(SpatialDirection(components));
                 cursor = cursor.Slice(consumed);
             }
             else
@@ -447,6 +459,16 @@ public static class NrrdParser
         while (result.Count < axisCount) result.Add(null);
         return result.ToArray();
     }
+
+    /// The (x, y, z) direction of a spatial axis, or null for a non-spatial one.
+    /// A "-time" space writes 4-component vectors: a spatial axis has no time
+    /// component, the time axis has nothing else.
+    private static float[]? SpatialDirection(float[] components) => components.Length switch
+    {
+        3 => components,
+        4 when components[3] == 0f => components.Take(3).ToArray(),
+        _ => null,
+    };
 
     /// Parses a parenthesised vector like `(x, y, z)`, returning its first 3 floats.
     private static float[]? ParseVector(string value)
