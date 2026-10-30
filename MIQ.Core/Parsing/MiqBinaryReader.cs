@@ -244,7 +244,8 @@ public static class MiqBinaryReader
     /// <summary>
     /// Optional faster zlib decompressor. Given a zlib (RFC 1950) stream and the
     /// exact output size, returns the decompressed bytes, or null to defer to the
-    /// managed path. The QuickLook plugin wires this to native libdeflate.
+    /// managed path, which then gives the verdict (and verifies the check value
+    /// itself). The QuickLook plugin wires this to native libdeflate.
     /// </summary>
     public static Func<byte[], int, byte[]?>? ZlibBufferDecompressorOverride;
 
@@ -255,7 +256,8 @@ public static class MiqBinaryReader
     /// it. A gzip stream is accepted too, since some writers emit one. Unlike gzip,
     /// zlib has no size trailer, so a declared size beyond DEFLATE's maximum
     /// expansion of the input is rejected before anything is allocated.
-    /// Throws <see cref="MiqException.TruncatedData"/> when the stream ends early.
+    /// Throws <see cref="MiqException.TruncatedData"/> when the stream ends early,
+    /// and <see cref="MiqException.DecompressionFailed"/> when its check value fails.
     /// </summary>
     public static byte[] InflateZlib(byte[] data, int outputBytes)
     {
@@ -277,25 +279,122 @@ public static class MiqBinaryReader
 
         try
         {
-            // The zlib header is two bytes; its Adler-32 trailer is never reached.
-            using var input = new MemoryStream(data, isGzip ? 0 : 2, data.Length - (isGzip ? 0 : 2),
-                writable: false);
-            using Stream inflater = isGzip
-                ? new GZipStream(input, CompressionMode.Decompress)
-                : new DeflateStream(input, CompressionMode.Decompress);
             var output = new byte[outputBytes];
-            var total = 0;
-            int n;
-            while (total < outputBytes &&
-                   (n = inflater.Read(output, total, Math.Min(CancelChunk, outputBytes - total))) > 0)
-                total += n;
-            if (total < outputBytes) throw MiqException.TruncatedData();
+            if (isGzip)
+            {
+                // GZipStream checks the CRC itself once it reaches the footer.
+                using var gzip = new GZipStream(new MemoryStream(data, writable: false), CompressionMode.Decompress);
+                Inflate(gzip, output);
+                return output;
+            }
+
+            // The zlib header is two bytes. Raw DEFLATE never reads the Adler-32
+            // trailer, which follows wherever the DEFLATE data ends: find that point
+            // (see DeflateEndLocator), then check the trailer there. A stream that
+            // runs past the declared size keeps its prefix unverified.
+            var input = new DeflateEndLocator(data, 2, data.Length - DeflateEndLocator.TailWindow);
+            if (!Inflate(new DeflateStream(input, CompressionMode.Decompress), output)) return output;
+            if (!input.EndIsExact)
+            {
+                // The stream ended before the tail window (trailing bytes): decode
+                // again, single-stepping from where the last chunk began.
+                input = new DeflateEndLocator(data, 2, input.LastChunkStart);
+                Inflate(new DeflateStream(input, CompressionMode.Decompress), output);
+                if (!input.EndIsExact) throw MiqException.DecompressionFailed();
+            }
+            var end = (int)input.Position; // at most data.Length
+            if (data.Length - end < 4) throw MiqException.TruncatedData();
+            if (Adler32(output) != BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(end)))
+                throw MiqException.DecompressionFailed();
             return output;
         }
         catch (InvalidDataException)
         {
             throw MiqException.DecompressionFailed();
         }
+    }
+
+    /// Fills <paramref name="output"/> from <paramref name="inflater"/> (and disposes
+    /// it). True when the stream ends exactly there, false when it runs on.
+    private static bool Inflate(Stream inflater, byte[] output)
+    {
+        using (inflater)
+        {
+            var total = 0;
+            int n;
+            while (total < output.Length &&
+                   (n = inflater.Read(output, total, Math.Min(CancelChunk, output.Length - total))) > 0)
+                total += n;
+            if (total < output.Length) throw MiqException.TruncatedData();
+            return inflater.Read(new byte[1], 0, 1) == 0;
+        }
+    }
+
+    /// <summary>
+    /// The input of a raw DEFLATE decode, handing out bytes so that where the
+    /// DEFLATE data ended is known afterwards. A decompressor asks for more input
+    /// only once it has used up what it holds, so every chunk but the last is fully
+    /// consumed. From <c>byteModeFrom</c> on it gets one byte per read; ending on
+    /// such a read, it has consumed exactly <see cref="Position"/> bytes. This
+    /// controls what the decompressor can see instead of asking how far it read
+    /// (its own buffering can read ahead).
+    /// </summary>
+    private sealed class DeflateEndLocator(byte[] data, int start, int byteModeFrom) : Stream
+    {
+        /// Bytes single-stepped at the end of the input. MetaIO's own files end
+        /// with the trailer, so the first pass is exact; longer trailing data takes
+        /// a second pass.
+        internal const int TailWindow = 4096;
+
+        private int _position = start;
+
+        /// Index in the data after the last byte handed out.
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+        /// Where the last read began; everything before it was consumed.
+        public int LastChunkStart { get; private set; } = start;
+        /// Whether the last read was a single byte, so <see cref="Position"/> is
+        /// exactly where the DEFLATE data ended.
+        public bool EndIsExact { get; private set; }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_position >= data.Length || count <= 0) return 0;
+            EndIsExact = _position >= byteModeFrom;
+            var n = EndIsExact ? 1 : Math.Min(count, byteModeFrom - _position);
+            Array.Copy(data, _position, buffer, offset, n);
+            LastChunkStart = _position;
+            _position += n;
+            return n;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => data.Length;
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    /// RFC 1950 Adler-32 of <paramref name="data"/>.
+    internal static uint Adler32(byte[] data)
+    {
+        const uint Modulus = 65521;
+        const int MaxRun = 5552; // the longest run before the sums can overflow 32 bits
+        uint a = 1, b = 0;
+        for (var start = 0; start < data.Length; start += MaxRun)
+        {
+            var end = start + Math.Min(MaxRun, data.Length - start);
+            for (var i = start; i < end; i++)
+            {
+                a += data[i];
+                b += a;
+            }
+            a %= Modulus;
+            b %= Modulus;
+        }
+        return b << 16 | a;
     }
 
     private static byte[] Trim(byte[] buf, int length)

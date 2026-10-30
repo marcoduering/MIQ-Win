@@ -36,7 +36,7 @@ public static class MetaImageParser
         public string? Comment { get; init; }
         /// `ElementDataFile` of a detached header; null when LOCAL.
         public string? DataFile { get; init; }
-        /// `HeaderSize`: bytes to skip in a detached data file (-1 = take the tail).
+        /// `HeaderSize`: where the payload starts in the file holding it (-1 = its tail).
         public long? HeaderSize { get; init; }
     }
 
@@ -57,8 +57,9 @@ public static class MetaImageParser
         if (meta.DataFile is { } dataFile)
         {
             data = loadDataFile!(dataFile);
-            payloadIndex = DetachedPayloadIndex(meta, data.Length, payloadBytes);
+            payloadIndex = 0;
         }
+        payloadIndex = PayloadIndex(meta, data.Length, payloadIndex, payloadBytes);
 
         byte[] storage;
         int payloadOffset;
@@ -92,20 +93,26 @@ public static class MetaImageParser
         };
     }
 
-    /// Where the voxels start in a detached data file. `HeaderSize` skips that many
-    /// bytes, and -1 means "the voxels are the file's tail". A compressed file is a
-    /// zlib stream from its first byte.
-    private static int DetachedPayloadIndex(MetaImageParsedHeader meta, int dataLength, long payloadBytes)
+    /// Where the voxels start in the file that holds them: the .mha itself or a
+    /// detached data file. MetaIO's `M_ReadElements` rule, the same for both:
+    /// `HeaderSize` > 0 is an absolute offset into that file (so a .mha may pad
+    /// between its header and payload), and -1 means the raw voxels are the file's
+    /// tail. Any other value keeps <paramref name="natural"/>: right after the
+    /// `ElementDataFile` line, or the start of a detached file. -1 is ignored for
+    /// compressed data, where MetaIO would seek back by the decompressed size.
+    private static int PayloadIndex(MetaImageParsedHeader meta, int dataLength, int natural, long payloadBytes)
     {
-        if (meta.Compressed) return 0;
-        var skip = meta.HeaderSize ?? 0;
-        if (skip == -1)
+        switch (meta.HeaderSize)
         {
-            if (dataLength < payloadBytes) throw MiqException.TruncatedData();
-            return (int)(dataLength - payloadBytes);
+            case long skip and > 0:
+                if (skip > dataLength) throw MiqException.TruncatedData();
+                return (int)skip;
+            case -1 when !meta.Compressed:
+                if (dataLength < payloadBytes) throw MiqException.TruncatedData();
+                return (int)(dataLength - payloadBytes);
+            default:
+                return natural;
         }
-        if (skip < 0 || skip > dataLength) throw MiqException.TruncatedData();
-        return (int)skip;
     }
 
     /// The `ElementDataFile` value of a header, or null when it is LOCAL or missing.

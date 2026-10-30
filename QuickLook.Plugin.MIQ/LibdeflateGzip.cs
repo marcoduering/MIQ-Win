@@ -98,8 +98,10 @@ internal static class LibdeflateGzip
 
     /// zlib decompressor for <see cref="MiqBinaryReader.ZlibBufferDecompressorOverride"/>
     /// (a compressed MetaImage payload). The caller passes the exact size its header
-    /// declares; anything else (short stream, extra data, corrupt input) returns null
-    /// and the managed path decides.
+    /// declares; anything else (short stream, extra data, corrupt input or a failed
+    /// Adler-32) returns null and the managed path decides. It verifies the check
+    /// value too, so a stream rejected here is not accepted there, and a truncated
+    /// stream still reports as truncated rather than as corrupt.
     internal static byte[]? DecompressZlib(byte[] input, int outputBytes)
     {
         var output = new byte[outputBytes];

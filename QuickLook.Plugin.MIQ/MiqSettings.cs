@@ -338,7 +338,7 @@ internal sealed class MiqSettings
         }
         if (!existing.ContainsKey("ShowVoxelValue"))     // added in 1.1
             AppendMigrationBlock(path, VoxelValueSettingText());
-        if (!existing.ContainsKey("ShowVoxelIndex"))     // added after 1.2.3
+        if (!existing.ContainsKey("ShowVoxelIndex"))     // added in 1.3.0
             AppendMigrationBlock(path, VoxelIndexSettingText());
     }
 
