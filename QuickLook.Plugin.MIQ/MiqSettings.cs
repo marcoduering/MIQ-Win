@@ -54,6 +54,9 @@ internal sealed class MiqSettings
     // Live "Voxel value" metadata row for the value under the crosshair.
     public bool ShowVoxelValue { get; private set; } = true;
 
+    // Live "Voxel index" metadata row: the crosshair voxel in file array order.
+    public bool ShowVoxelIndex { get; private set; } = true;
+
     // View orientation: Stored renders axes as stored; Neurological/Radiological
     // reorient + relabel each plane (they differ only by the coronal/axial R/L
     // flip). Files without an OrientationFrame always fall back to Stored.
@@ -214,6 +217,7 @@ internal sealed class MiqSettings
         MetadataValueColor = Col(m, "MetadataValueColor", MetadataValueColor);
         ShowDisclaimer = Flag(m, "ShowDisclaimer", ShowDisclaimer);
         ShowVoxelValue = Flag(m, "ShowVoxelValue", ShowVoxelValue);
+        ShowVoxelIndex = Flag(m, "ShowVoxelIndex", ShowVoxelIndex);
         Orientation = OrientationOf(m, "Orientation", Orientation);
         Segmentation = SegmentationOf(m, "SegmentationColors", Segmentation);
         IntensityPercentileLow = Num(m, "IntensityPercentileLow", IntensityPercentileLow);
@@ -314,6 +318,13 @@ internal sealed class MiqSettings
         "; visible) and updates as you move it; never shown for RGB images.",
         $"ShowVoxelValue          = {(ShowVoxelValue ? "true" : "false")}");
 
+    // The ShowVoxelIndex block, shared by DefaultText and MigrateMissingKeys.
+    private string VoxelIndexSettingText() => string.Join("\r\n",
+        "; Live \"Voxel index\" row below it: the crosshair voxel's index in the",
+        "; file's own axis order, counted from 0 (as nibabel / fsleyes / pynrrd",
+        "; count). Appears only while you interact.",
+        $"ShowVoxelIndex          = {(ShowVoxelIndex ? "true" : "false")}");
+
     // Append any setting added after the user's ini was first written, so an
     // upgraded user sees the new key documented in their own file.
     private void MigrateMissingKeys(string path, IReadOnlyDictionary<string, string> existing)
@@ -327,6 +338,8 @@ internal sealed class MiqSettings
         }
         if (!existing.ContainsKey("ShowVoxelValue"))     // added in 1.1
             AppendMigrationBlock(path, VoxelValueSettingText());
+        if (!existing.ContainsKey("ShowVoxelIndex"))     // added after 1.2.3
+            AppendMigrationBlock(path, VoxelIndexSettingText());
     }
 
     private static void AppendMigrationBlock(string path, string body)
@@ -414,10 +427,15 @@ internal sealed class MiqSettings
             "",
             "; Metadata rows to show, in this order; unavailable rows are skipped.",
             "; Available: Format, Dimensions, Spacing, Orientation, Datatype,",
-            ";            Volumes, Scaling.",
+            ";            Volumes, Scaling, Comment.",
+            "; Comment is the header's free-text description (NIfTI descrip, MIF",
+            "; comments, NRRD content, MetaImage Comment); off by default because it",
+            "; can carry patient details (MRtrix copies DICOM patient fields into it).",
             $"MetadataFields          = {string.Join(", ", MetadataFields)}",
             "",
             VoxelValueSettingText(),
+            "",
+            VoxelIndexSettingText(),
             "",
             "; Footer disclaimer — MIQ-Win is a research/preview tool, not a medical",
             "; device and not for diagnostic use. Set false to hide the line at the",

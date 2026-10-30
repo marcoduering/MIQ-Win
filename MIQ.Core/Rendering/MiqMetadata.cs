@@ -17,11 +17,34 @@ public sealed class MiqMetadata
     private readonly string? _format;
     private readonly string? _orientation;
 
+    private readonly string? _comment;
+
     public MiqMetadata(MiqHeader header, string? formatName, string? orientation)
     {
         _h = header;
         _format = formatName;
-        _orientation = orientation;
+        // A NIfTI whose qform disagrees with the sform it is shown by: name the
+        // qform's label too, since qform-preferring tools show it in that orientation.
+        _orientation = orientation is { } o && header.ConflictingQformOrientation is { } q
+            ? $"{o} (qform: {q})"
+            : orientation;
+        _comment = header.Comment is { } c ? DisplayComment(c) : null;
+    }
+
+    /// At most this many comment lines are shown, plus a "…" line when cut. The
+    /// panel applies the same limit again to *wrapped* lines, which only it can
+    /// measure.
+    public const int MaxCommentLines = 3;
+
+    /// Caps the comment to <see cref="MaxCommentLines"/> lines, adding a "…" line
+    /// after them when there are more (on its own line, since an ellipsis at the
+    /// end of a line reads as part of the text).
+    internal static string DisplayComment(string comment)
+    {
+        var lines = comment.Split(['\n'], StringSplitOptions.RemoveEmptyEntries);
+        var shown = lines.Take(MaxCommentLines).ToList();
+        if (lines.Length > MaxCommentLines) shown.Add("…");
+        return string.Join("\n", shown);
     }
 
     public IReadOnlyList<MetadataEntry> AsDisplayLines()
@@ -47,6 +70,9 @@ public sealed class MiqMetadata
 
         if (Scaling() is { } s)
             entries.Add(new("Scaling", s));
+
+        if (_comment is { } c)
+            entries.Add(new("Comment", c));
 
         return entries;
     }

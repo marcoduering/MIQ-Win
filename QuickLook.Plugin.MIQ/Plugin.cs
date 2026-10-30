@@ -18,7 +18,7 @@ namespace QuickLook.Plugin.MIQ;
 public sealed class Plugin : IViewer
 {
     private static readonly string[] Suffixes =
-        [".nii", ".nii.gz", ".mgh", ".mgz", ".mgh.gz", ".mif", ".mif.gz", ".nrrd"];
+        [".nii", ".nii.gz", ".mgh", ".mgz", ".mgh.gz", ".mif", ".mif.gz", ".nrrd", ".mha"];
 
     private MiqPreviewControl? _control;
     // Retain the parsed volume for the viewer's lifetime — it owns the (large)
@@ -44,6 +44,8 @@ public sealed class Plugin : IViewer
             // Mid-file gzip segments (e.g. gzip-encoded NRRD payloads) don't go
             // through the path-based override — accelerate them too.
             MiqBinaryReader.GzipBufferDecompressorOverride = LibdeflateGzip.DecompressBuffer;
+            // Compressed MetaImage payloads are zlib streams.
+            MiqBinaryReader.ZlibBufferDecompressorOverride = LibdeflateGzip.DecompressZlib;
         }
         catch (Exception)
         {

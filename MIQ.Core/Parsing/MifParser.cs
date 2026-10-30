@@ -18,18 +18,19 @@ public static class MifParser
 {
     public static MiqImage Parse(byte[] data, string? formatLabel = null)
     {
-        var (fields, transformRows, headerEndOffset) = ParseHeaderFields(data);
-        return BuildImage(data, fields, transformRows, headerEndOffset, formatLabel);
+        var (fields, transformRows, comments, headerEndOffset) = ParseHeaderFields(data);
+        return BuildImage(data, fields, transformRows, comments, headerEndOffset, formatLabel);
     }
 
     // ── Header text parsing ──────────────────────────────────────────────────
 
     /// <summary>
     /// Splits the header into single-valued fields (last occurrence wins) plus the
-    /// <c>transform:</c> rows — written as three repeated lines, and the only
-    /// repeated key this parser consumes.
+    /// two repeated keys this parser consumes: the <c>transform:</c> rows (written
+    /// as three lines) and every <c>comments:</c> line, in file order.
     /// </summary>
-    private static (Dictionary<string, string> fields, List<string> transformRows, int headerEndOffset)
+    private static (Dictionary<string, string> fields, List<string> transformRows,
+        List<string> comments, int headerEndOffset)
         ParseHeaderFields(byte[] data)
     {
         var endOffset = FindEndMarker(data);
@@ -44,6 +45,7 @@ public static class MifParser
 
         var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var transformRows = new List<string>();
+        var comments = new List<string>();
         for (var i = 1; i < lines.Length; i++)
         {
             var line = lines[i].Trim();
@@ -55,11 +57,13 @@ public static class MifParser
             if (key.Length == 0) continue;
             if (string.Equals(key, "transform", StringComparison.OrdinalIgnoreCase))
                 transformRows.Add(value);
+            else if (string.Equals(key, "comments", StringComparison.OrdinalIgnoreCase))
+                comments.Add(value);
             else
                 fields[key] = value;
         }
 
-        return (fields, transformRows, endOffset);
+        return (fields, transformRows, comments, endOffset);
     }
 
     // Find "END" on its own line followed by \n (or \r\n).
@@ -82,7 +86,7 @@ public static class MifParser
 
     private static MiqImage BuildImage(
         byte[] data, Dictionary<string, string> fields, List<string> transformRows,
-        int headerEndOffset, string? formatLabel)
+        List<string> comments, int headerEndOffset, string? formatLabel)
     {
         if (!fields.TryGetValue("dim", out var dimStr))
             throw new MiqException("MIF header: missing 'dim' field.");
@@ -162,6 +166,14 @@ public static class MifParser
         var dimensions = new int[4];
         for (var i = 0; i < 4; i++) dimensions[i] = i < storedDim.Length ? storedDim[i] : 1;
 
+        // MRtrix indexes voxels along the image axes from a reversed axis's far end;
+        // MIQ walks memory order forwards (strides above are positive), so map back.
+        int[] indexAxes = [.. order, 3];
+        var fileIndexAxes = new FileIndexAxes(
+            indexAxes,
+            indexAxes.Select(a => a < layout.Length && layout[a].Reversed).ToArray(),
+            dim.Length);
+
         var header = new MiqHeader
         {
             LittleEndian  = littleEndian,
@@ -180,6 +192,8 @@ public static class MifParser
             // Datatype now reads uint8 for a Bit file; report what the header said.
             DatatypeLabel = isBit ? "bit" : null,
             OrientationFrame = orientationFrame,
+            Comment       = MiqParser.HeaderComment(comments),
+            FileIndexAxes = fileIndexAxes,
         };
 
         return new MiqImage

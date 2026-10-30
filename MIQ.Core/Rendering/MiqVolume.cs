@@ -71,6 +71,10 @@ public sealed class MiqVolume(MiqImage image, MiqOrientation orientation = MiqOr
     /// data; callers should gate on <see cref="IsRgb"/>. Port of MIQVolume.voxel.
     public float VoxelValue(int x, int y, int z, int t) => Voxel(x, y, z, t);
 
+    /// The voxel's index in the file's own axis order — what the crosshair
+    /// "Voxel index" metadata row displays. See <see cref="MiqHeader.FileVoxelIndex"/>.
+    public int[] FileVoxelIndex(int x, int y, int z, int t) => H.FileVoxelIndex(x, y, z, t);
+
     // Stored-orientation plan per plane (from OrientationResolver.storedPlan):
     // (sliceAxis, hAxis, vAxis); hReversed always false, vReversed always true.
     private static (int slice, int h, int v) StoredPlan(SlicePlane plane) => plane switch

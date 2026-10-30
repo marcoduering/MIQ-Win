@@ -16,6 +16,7 @@ public enum MiqFileKind
     Mif,
     MifGz,
     Nrrd,
+    Mha,
 }
 
 public static class MiqFileKindExtensions
@@ -36,6 +37,7 @@ public static class MiqFileKindExtensions
             "mgz" => MiqFileKind.Mgz,
             "mif" => MiqFileKind.Mif,
             "nrrd" => MiqFileKind.Nrrd,
+            "mha" => MiqFileKind.Mha,
             _ => null,
         };
     }
@@ -55,6 +57,7 @@ public static class MiqFileKindExtensions
         MiqFileKind.Mif => "MRtrix MIF",
         MiqFileKind.MifGz => "Compressed MRtrix MIF",
         MiqFileKind.Nrrd => "NRRD",
+        MiqFileKind.Mha => "MetaImage",
         _ => throw new ArgumentOutOfRangeException(nameof(kind)),
     };
 }

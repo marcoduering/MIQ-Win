@@ -28,6 +28,11 @@ internal static class LibdeflateGzip
         IntPtr d, byte[] inBytes, UIntPtr inLen,
         byte[] outBytes, UIntPtr outLen, out UIntPtr actualOut);
 
+    [DllImport("libdeflate", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int libdeflate_zlib_decompress(
+        IntPtr d, byte[] inBytes, UIntPtr inLen,
+        byte[] outBytes, UIntPtr outLen, out UIntPtr actualOut);
+
     // libdeflate_result
     private const int Success = 0;
 
@@ -84,6 +89,28 @@ internal static class LibdeflateGzip
             // Exact single-member case (the norm). Anything else → null so the
             // caller uses the managed path (multi-member / odd ISIZE).
             return r == Success && (ulong)actual == isize ? output : null;
+        }
+        finally
+        {
+            libdeflate_free_decompressor(d);
+        }
+    }
+
+    /// zlib decompressor for <see cref="MiqBinaryReader.ZlibBufferDecompressorOverride"/>
+    /// (a compressed MetaImage payload). The caller passes the exact size its header
+    /// declares; anything else (short stream, extra data, corrupt input) returns null
+    /// and the managed path decides.
+    internal static byte[]? DecompressZlib(byte[] input, int outputBytes)
+    {
+        var output = new byte[outputBytes];
+        var d = libdeflate_alloc_decompressor();
+        if (d == IntPtr.Zero) return null;
+        try
+        {
+            var r = libdeflate_zlib_decompress(
+                d, input, (UIntPtr)input.Length,
+                output, (UIntPtr)output.Length, out var actual);
+            return r == Success && (ulong)actual == (ulong)outputBytes ? output : null;
         }
         finally
         {

@@ -26,5 +26,5 @@ public sealed class MiqException : Exception
         new("Failed to decompress gzipped data.");
 
     public static MiqException UnsupportedFileFormat() =>
-        new("Unsupported file format. Expected .nii, .nii.gz, .mgh, .mgz, .mgh.gz, .mif, .mif.gz, or .nrrd.");
+        new("Unsupported file format. Expected .nii, .nii.gz, .mgh, .mgz, .mgh.gz, .mif, .mif.gz, .nrrd, or .mha.");
 }

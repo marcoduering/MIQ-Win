@@ -82,6 +82,8 @@ public static class NiftiParser
         var srowY = MiqBinaryReader.Float32Array(data, 296, count: 4, littleEndian);
         var srowZ = MiqBinaryReader.Float32Array(data, 312, count: 4, littleEndian);
         var qfac = pixdim.Length > 0 ? pixdim[0] : 1f;
+        var (frame, conflictingQform) = NiftiOrientationFrame(
+            sformCode, srowX, srowY, srowZ, qformCode, quaternB, quaternC, quaternD, qfac);
 
         return new MiqHeader
         {
@@ -102,8 +104,9 @@ public static class NiftiParser
             QuaternD = quaternD,
             Qfac = qfac,
             FormatLabel = formatLabel,
-            OrientationFrame = NiftiOrientationFrame(
-                sformCode, srowX, srowY, srowZ, qformCode, quaternB, quaternC, quaternD, qfac),
+            OrientationFrame = frame,
+            ConflictingQformOrientation = conflictingQform,
+            Comment = MiqParser.HeaderComment(data, offset: 148, length: 80),
         };
     }
 
@@ -138,6 +141,8 @@ public static class NiftiParser
         var srowZ = Array.ConvertAll(
             MiqBinaryReader.Float64Array(data, 464, count: 4, littleEndian), v => (float)v);
         var qfac = pixdim.Length > 0 ? pixdim[0] : 1f;
+        var (frame, conflictingQform) = NiftiOrientationFrame(
+            sformCode, srowX, srowY, srowZ, qformCode, quaternB, quaternC, quaternD, qfac);
 
         return new MiqHeader
         {
@@ -158,8 +163,9 @@ public static class NiftiParser
             QuaternD = quaternD,
             Qfac = qfac,
             FormatLabel = formatLabel,
-            OrientationFrame = NiftiOrientationFrame(
-                sformCode, srowX, srowY, srowZ, qformCode, quaternB, quaternC, quaternD, qfac),
+            OrientationFrame = frame,
+            ConflictingQformOrientation = conflictingQform,
+            Comment = MiqParser.HeaderComment(data, offset: 240, length: 80),
         };
     }
 
@@ -167,21 +173,54 @@ public static class NiftiParser
 
     /// Prefer sform when present and non-degenerate; otherwise qform; else null.
     /// Port of MIQParser+NIfTI.swift's niftiOrientationFrame.
-    private static OrientationFrame? NiftiOrientationFrame(
+    ///
+    /// Also returns the qform's orientation label when both are valid and disagree
+    /// (e.g. sform RAS, qform LAS): tools that prefer the qform then show the image
+    /// in another orientation. The labels alone can't decide that — an axis near
+    /// 45° between two world axes (an oblique scan) can tip either way on rounding —
+    /// so a conflict also needs some storage axis to point more than 45° away from
+    /// where the other transform puts it.
+    private static (OrientationFrame? frame, string? conflictingQform) NiftiOrientationFrame(
         int sformCode, IReadOnlyList<float> srowX, IReadOnlyList<float> srowY, IReadOnlyList<float> srowZ,
         int qformCode, float quaternB, float quaternC, float quaternD, float qfac)
     {
-        if (sformCode > 0)
+        var qformRows = qformCode > 0
+            ? OrientationFrame.QuaternionRows(quaternB, quaternC, quaternD, qfac)
+            : null;
+        var qformFrame = qformRows is null
+            ? null
+            : OrientationFrame.From(qformRows[0], qformRows[1], qformRows[2]);
+
+        if (sformCode > 0 && OrientationFrame.From(srowX, srowY, srowZ) is { } frame)
         {
-            var f = OrientationFrame.From(srowX, srowY, srowZ);
-            if (f is not null) return f;
+            var conflict = qformFrame is not null && qformFrame.Label != frame.Label
+                && SomeAxisDiverges([srowX, srowY, srowZ], qformRows!);
+            return (frame, conflict ? qformFrame!.Label : null);
         }
-        if (qformCode > 0)
+        return (qformFrame, null);
+    }
+
+    /// Whether some storage axis (a column of the 3×3 part) differs by more than
+    /// 45° between two sform-style row sets. Scale-invariant, so voxel size
+    /// doesn't count.
+    private static bool SomeAxisDiverges(IReadOnlyList<float>[] a, IReadOnlyList<float>[] b)
+    {
+        var cos45 = Math.Sqrt(0.5);
+        for (var col = 0; col < 3; col++)
         {
-            var f = OrientationFrame.FromQuaternion(quaternB, quaternC, quaternD, qfac);
-            if (f is not null) return f;
+            double dot = 0, na = 0, nb = 0;
+            for (var row = 0; row < 3; row++)
+            {
+                double u = col < a[row].Count ? a[row][col] : 0;
+                double v = col < b[row].Count ? b[row][col] : 0;
+                dot += u * v;
+                na += u * u;
+                nb += v * v;
+            }
+            var norms = Math.Sqrt(na * nb);
+            if (norms > 0 && dot < cos45 * norms) return true;
         }
-        return null;
+        return false;
     }
 
     private static MiqDatatype ReadAndValidateDatatype(

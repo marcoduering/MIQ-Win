@@ -33,6 +33,8 @@ public static class NrrdParser
         public (float rx, float ry, float rz)? ToRasSigns { get; init; }
         /// Fallback voxel spacings when SpaceDirections is absent.
         public float[]? Spacings { get; init; }
+        /// The `content:` field.
+        public string? Content { get; init; }
     }
 
     // ── Public entry points ──────────────────────────────────────────────────
@@ -188,6 +190,7 @@ public static class NrrdParser
             SpaceOrigin = spaceOrigin,
             ToRasSigns = toRasSigns,
             Spacings = spacings,
+            Content = fields.TryGetValue("content", out var content) ? content : null,
         };
     }
 
@@ -238,6 +241,13 @@ public static class NrrdParser
 
         var orientationFrame = hasAffine ? OrientationFrame.From(srowX, srowY, srowZ) : null;
 
+        // A non-spatial axis may come first (e.g. a DWI list axis); the file's
+        // index then leads with it.
+        var fileIndexAxes = new FileIndexAxes(
+            [spatialAxes[0], spatialAxes[1], spatialAxes[2], volumeAxis ?? 3],
+            new bool[4],
+            nrrd.Sizes.Length);
+
         var header = new MiqHeader
         {
             LittleEndian = nrrd.LittleEndian,
@@ -254,6 +264,8 @@ public static class NrrdParser
             SrowZ = srowZ,
             FormatLabel = nrrd.Encoding == NrrdEncoding.Gzip ? "Compressed NRRD" : null,
             OrientationFrame = orientationFrame,
+            Comment = nrrd.Content is { } c ? MiqParser.HeaderComment([c]) : null,
+            FileIndexAxes = fileIndexAxes,
         };
 
         return new NrrdImageDescriptor(header, customStrides);

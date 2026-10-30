@@ -317,17 +317,28 @@ internal sealed class MiqTriPlanarControl : FrameworkElement
         _scrubTrackX1 = tx1;
     }
 
-    // Metadata rows, plus a live "Voxel value" last row when enabled, once the
-    // crosshair is visible, and for non-RGB data.
+    // Metadata rows, plus live last rows once the crosshair is visible: "Voxel
+    // value" when enabled and for non-RGB data, then "Voxel index" when enabled
+    // (an RGB voxel still has an index).
     private IReadOnlyList<MetadataEntry> MetadataWithValue()
     {
-        if (!_settings.ShowVoxelValue || !_interacted || _vol.IsRgb)
-            return _metadata;
+        if (!_interacted) return _metadata;
+        var showValue = _settings.ShowVoxelValue && !_vol.IsRgb;
+        if (!showValue && !_settings.ShowVoxelIndex) return _metadata;
 
-        var value = FormatVoxelValue(_vol.VoxelValue(_focus[0], _focus[1], _focus[2], _volumeIndex));
-        var list = new List<MetadataEntry>(_metadata) { new("Voxel value", value) };
+        var list = new List<MetadataEntry>(_metadata);
+        if (showValue)
+            list.Add(new("Voxel value",
+                FormatVoxelValue(_vol.VoxelValue(_focus[0], _focus[1], _focus[2], _volumeIndex))));
+        if (_settings.ShowVoxelIndex)
+            list.Add(new("Voxel index", FormatVoxelIndex(
+                _vol.FileVoxelIndex(_focus[0], _focus[1], _focus[2], _volumeIndex))));
         return list;
     }
+
+    // e.g. "[128, 97, 88, 12]".
+    private static string FormatVoxelIndex(int[] index) =>
+        "[" + string.Join(", ", index.Select(i => i.ToString(CultureInfo.InvariantCulture))) + "]";
 
     // Six significant digits, matching the macOS readout. Non-finite values are
     // named explicitly (NaN is meaningful data here, e.g. masked stat maps); the

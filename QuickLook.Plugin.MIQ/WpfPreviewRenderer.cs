@@ -169,6 +169,19 @@ internal static class WpfPreviewRenderer
         // Defensive: keep the value column on-panel if labels are huge.
         var valueX = Math.Min(r.X + padX + labelW + gap, r.Right - padX - 20);
 
+        // The comment is the only multi-line value: it wraps in the value column,
+        // capped so a long one can't fill the panel. MiqMetadata already cut it to
+        // MaxCommentLines lines plus a "…" line; this caps the *wrapped* lines too.
+        for (var i = 0; i < entries.Count; i++)
+        {
+            if (entries[i].Label != "Comment") continue;
+            var v = values[i];
+            v.MaxTextWidth = Math.Max(20, r.Right - padX - valueX);
+            v.MaxLineCount = MiqMetadata.MaxCommentLines
+                             + (entries[i].Value.EndsWith("\n…", StringComparison.Ordinal) ? 1 : 0);
+            v.Trimming = TextTrimming.CharacterEllipsis;
+        }
+
         // Reserve a stable slot for the Volumes value ("N / M") so the inline
         // scrubber track keeps a fixed x. It must not shift when the index gains
         // a digit, nor when the "loading…" suffix drops off after expansion.
@@ -182,7 +195,11 @@ internal static class WpfPreviewRenderer
         var y = r.Y + padTop;
         for (var i = 0; i < entries.Count; i++)
         {
-            if (y + lineH > rowsBottom) break;
+            // A wrapped value (the comment) grows its row by its extra lines.
+            var rowH = entries[i].Label == "Comment"
+                ? lineH + Math.Max(0, values[i].Height - textH)
+                : lineH;
+            if (y + rowH > rowsBottom) break;
             dc.DrawText(labels[i], new Point(r.X + padX, y));
             dc.DrawText(values[i], new Point(valueX, y));
 
@@ -214,7 +231,7 @@ internal static class WpfPreviewRenderer
                     trackX1 = tx1;
                 }
             }
-            y += lineH;
+            y += rowH;
         }
 
         if (disclaimer is not null)

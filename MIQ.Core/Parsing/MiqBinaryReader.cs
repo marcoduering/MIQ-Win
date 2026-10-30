@@ -241,6 +241,63 @@ public static class MiqBinaryReader
         }
     }
 
+    /// <summary>
+    /// Optional faster zlib decompressor. Given a zlib (RFC 1950) stream and the
+    /// exact output size, returns the decompressed bytes, or null to defer to the
+    /// managed path. The QuickLook plugin wires this to native libdeflate.
+    /// </summary>
+    public static Func<byte[], int, byte[]?>? ZlibBufferDecompressorOverride;
+
+    /// <summary>
+    /// Inflates a zlib-wrapped (RFC 1950) stream, the encoding MetaImage writes for
+    /// <c>CompressedData = True</c>, producing exactly <paramref name="outputBytes"/>
+    /// (the payload size the caller's header declares) and ignoring anything past
+    /// it. A gzip stream is accepted too, since some writers emit one. Unlike gzip,
+    /// zlib has no size trailer, so a declared size beyond DEFLATE's maximum
+    /// expansion of the input is rejected before anything is allocated.
+    /// Throws <see cref="MiqException.TruncatedData"/> when the stream ends early.
+    /// </summary>
+    public static byte[] InflateZlib(byte[] data, int outputBytes)
+    {
+        if (data.Length < 2 || outputBytes < 1) throw MiqException.DecompressionFailed();
+        if (outputBytes > data.Length * MaxDeflateExpansion) throw MiqException.TruncatedData();
+
+        var isGzip = IsLikelyGzip(data);
+        if (!isGzip)
+        {
+            // CMF/FLG: deflate (CM = 8), a check value that is a multiple of 31, and
+            // no preset dictionary (FDICT), which MetaIO never writes.
+            var cmf = data[0];
+            var flg = data[1];
+            if ((cmf & 0x0F) != 8 || (cmf << 8 | flg) % 31 != 0 || (flg & 0x20) != 0)
+                throw MiqException.DecompressionFailed();
+            if (ZlibBufferDecompressorOverride is { } fast && fast(data, outputBytes) is { } result)
+                return result;
+        }
+
+        try
+        {
+            // The zlib header is two bytes; its Adler-32 trailer is never reached.
+            using var input = new MemoryStream(data, isGzip ? 0 : 2, data.Length - (isGzip ? 0 : 2),
+                writable: false);
+            using Stream inflater = isGzip
+                ? new GZipStream(input, CompressionMode.Decompress)
+                : new DeflateStream(input, CompressionMode.Decompress);
+            var output = new byte[outputBytes];
+            var total = 0;
+            int n;
+            while (total < outputBytes &&
+                   (n = inflater.Read(output, total, Math.Min(CancelChunk, outputBytes - total))) > 0)
+                total += n;
+            if (total < outputBytes) throw MiqException.TruncatedData();
+            return output;
+        }
+        catch (InvalidDataException)
+        {
+            throw MiqException.DecompressionFailed();
+        }
+    }
+
     private static byte[] Trim(byte[] buf, int length)
     {
         var t = new byte[length];

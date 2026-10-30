@@ -88,6 +88,14 @@ public sealed class OrientationFrame
     /// Build from a NIfTI qform quaternion. qfac is sign of pixdim[0].
     public static OrientationFrame? FromQuaternion(float b, float c, float d, float qfac)
     {
+        var rows = QuaternionRows(b, c, d, qfac);
+        return From(rows[0], rows[1], rows[2]);
+    }
+
+    /// The qform's rotation matrix (qfac applied) as three sform-style rows, so it
+    /// can be compared column by column with an sform.
+    internal static float[][] QuaternionRows(float b, float c, float d, float qfac)
+    {
         var aSquared = Math.Max(0f, 1 - b * b - c * c - d * d);
         var a = (float)Math.Sqrt(aSquared);
         var qs = qfac < 0 ? -1f : 1f;
@@ -102,7 +110,7 @@ public sealed class OrientationFrame
         var r21 = 2 * (c * d + a * b);
         var r22 = (a * a + d * d - b * b - c * c) * qs;
 
-        return From(new[] { r00, r01, r02 }, new[] { r10, r11, r12 }, new[] { r20, r21, r22 });
+        return [[r00, r01, r02], [r10, r11, r12], [r20, r21, r22]];
     }
 
     private static StorageAxisOrientation Anatomy(float x, float y, float z)

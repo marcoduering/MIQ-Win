@@ -61,6 +61,7 @@ public static class MiqParser
             MiqFileKind.Mgh or MiqFileKind.Mgz       => MghParser.Parse(data, formatLabel),
             MiqFileKind.Mif or MiqFileKind.MifGz     => MifParser.Parse(data, formatLabel),
             MiqFileKind.Nrrd                         => NrrdParser.Parse(data, formatLabel),
+            MiqFileKind.Mha                          => MetaImageParser.Parse(data),
             _ => throw MiqException.UnsupportedFileFormat(),
         };
     }
@@ -183,6 +184,31 @@ public static class MiqParser
     /// <see cref="MiqImage.ExpansionBlocked"/>: true when the full data can't be
     /// held (permanent volume-0 view); false to let the viewer expand in the
     /// background (a latency optimisation for large-but-in-limit files).
+    /// Cleans a header's free-text description into <see cref="MiqHeader.Comment"/>:
+    /// each part is cut at its first NUL (NIfTI pads `descrip` with NULs, sometimes
+    /// followed by junk), control characters become spaces, whitespace is trimmed
+    /// and empty parts are dropped. The parts are joined with "\n"; null when
+    /// nothing is left.
+    internal static string? HeaderComment(IEnumerable<string> parts)
+    {
+        var lines = new List<string>();
+        foreach (var part in parts)
+        {
+            var nul = part.IndexOf('\0');
+            var cut = nul >= 0 ? part.Substring(0, nul) : part;
+            var cleaned = new string(cut.Select(c => char.IsControl(c) ? ' ' : c).ToArray()).Trim();
+            if (cleaned.Length > 0) lines.Add(cleaned);
+        }
+        return lines.Count > 0 ? string.Join("\n", lines) : null;
+    }
+
+    /// <see cref="HeaderComment(IEnumerable{string})"/> for a fixed-size byte field
+    /// (NIfTI `descrip`), decoded as UTF-8 with invalid bytes replaced.
+    internal static string? HeaderComment(byte[] data, int offset, int length) =>
+        data.Length - offset >= length
+            ? HeaderComment([System.Text.Encoding.UTF8.GetString(data, offset, length)])
+            : null;
+
     private static MiqImage ParseNiftiFirstVolume(string filePath, bool blocked, CancellationToken ct)
     {
         using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);

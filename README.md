@@ -26,8 +26,9 @@ Supported formats:
 - :white_check_mark: **FreeSurfer** — `.mgh`, `.mgz`, `.mgh.gz`
 - :white_check_mark: **MRtrix** — `.mif`, `.mif.gz`
 - :white_check_mark: **NRRD** — `.nrrd` *(only the single-file variant with attached header; `raw` and `gzip` encodings)*
+- :white_check_mark: **ITK MetaImage** — `.mha` *(only the single-file variant; raw or zlib-compressed data)*
 
-Most formats are supported uncompressed and gzip-compressed. The plugin determines the format from the file extension, so it is **important that files have the correct extensions**. Compound extensions like `.nii.gz` work directly — the plugin matches by path suffix, independent of Windows file associations. Detached NRRD headers (`.nhdr` with a separate data file) are not previewable.
+Most formats are supported uncompressed and gzip-compressed. The plugin determines the format from the file extension, so it is **important that files have the correct extensions**. Compound extensions like `.nii.gz` work directly — the plugin matches by path suffix, independent of Windows file associations. Detached NRRD headers (`.nhdr` with a separate data file) and detached MetaImage headers (`.mhd` with a separate `.raw` file) are not previewable.
 
 ## Installation & Updates
 
@@ -60,7 +61,7 @@ Press **Space** on any supported file to get an instant preview. Navigate betwee
 The preview is interactive:
 
 - **Scroll** the mouse wheel over any pane to move through that plane's slices.
-- **Click** (or drag) in a pane to set the focus point; all three planes link to it, with crosshairs marking the spot.
+- **Click** (or drag) in a pane to set the focus point; all three planes link to it, with crosshairs marking the spot. The metadata panel then shows the voxel value and the voxel index (in the file's own axis order, counted from 0) under the crosshair.
 - **Right-click + drag** to adjust the intensity window/level (brightness/contrast).
 - **Alt + scroll** to step through volumes of a 4-D series.
 
