@@ -47,23 +47,43 @@ public static class MiqParser
     /// Parses a file fully. Pass a <paramref name="ct"/> for background loads
     /// (e.g. volume expansion) so a slow read/decompress abandons promptly when
     /// the user navigates away, freeing CPU/IO for the next preview.
+    /// A data file of a split pair (<c>.img</c>, <c>.raw</c>, …) parses through the
+    /// header that claims it (<see cref="DetachedData.HeaderFor"/>).
     public static MiqImage Parse(string filePath, CancellationToken ct = default)
     {
-        var kind = MiqFileKindExtensions.FromPath(filePath)
-                   ?? throw MiqException.UnsupportedFileFormat();
-
-        var data = LoadAndDecompress(filePath, kind, ct);
-        var formatLabel = kind.IsCompressed() ? kind.DisplayName() : null;
-
-        return kind switch
+        var kind = MiqFileKindExtensions.FromPath(filePath);
+        if (kind is null && DetachedData.HeaderFor(filePath) is { } header)
         {
-            MiqFileKind.Nii or MiqFileKind.NiiGz     => NiftiParser.Parse(data, kind.IsCompressed()),
+            filePath = header;
+            kind = MiqFileKindExtensions.FromPath(header);
+        }
+        if (kind is not { } k) throw MiqException.UnsupportedFileFormat();
+
+        var data = LoadAndDecompress(filePath, k, ct);
+        var formatLabel = k.IsCompressed() ? k.DisplayName() : null;
+
+        return k switch
+        {
+            MiqFileKind.Nii or MiqFileKind.NiiGz     => NiftiParser.Parse(data, k.IsCompressed()),
             MiqFileKind.Mgh or MiqFileKind.Mgz       => MghParser.Parse(data, formatLabel),
             MiqFileKind.Mif or MiqFileKind.MifGz     => MifParser.Parse(data, formatLabel),
             MiqFileKind.Nrrd                         => NrrdParser.Parse(data, formatLabel),
             MiqFileKind.Mha                          => MetaImageParser.Parse(data),
+            MiqFileKind.Mhd                          => MetaImageParser.Parse(data, DetachedData.Loader(filePath, ct)),
+            MiqFileKind.Nhdr                         => NrrdParser.Parse(data, null, DetachedData.Loader(filePath, ct)),
+            MiqFileKind.AnalyzeHdr                   => ParseAnalyzePair(filePath, data, ct),
             _ => throw MiqException.UnsupportedFileFormat(),
         };
+    }
+
+    private static MiqImage ParseAnalyzePair(string hdrPath, byte[] hdr, CancellationToken ct)
+    {
+        var imgPath = DetachedData.AnalyzeImagePath(hdrPath);
+        var compressed = imgPath.EndsWith(".gz", StringComparison.OrdinalIgnoreCase);
+        var img = compressed
+            ? LoadAndDecompress(imgPath, MiqFileKind.NiiGz, ct)
+            : DetachedData.ReadFile(imgPath, ct);
+        return NiftiParser.ParsePair(hdr, img, compressed);
     }
 
     /// Uncancellable <see cref="ParsePartial(string, CancellationToken)"/>. An
@@ -86,8 +106,9 @@ public static class MiqParser
     /// </summary>
     public static MiqImage ParsePartial(string filePath, CancellationToken ct)
     {
-        var kind = MiqFileKindExtensions.FromPath(filePath)
-                   ?? throw MiqException.UnsupportedFileFormat();
+        // Split formats (and data files of a pair) always parse fully.
+        if (MiqFileKindExtensions.FromPath(filePath) is not { } kind)
+            return Parse(filePath, ct);
 
         if (kind == MiqFileKind.Nii)
         {

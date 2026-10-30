@@ -28,6 +28,38 @@ public static class NiftiParser
         };
     }
 
+    /// A split pair: the 348-byte <c>.hdr</c> plus the <c>.img</c> voxels (already
+    /// gunzipped if it was <c>.img.gz</c>). The header's magic tells a NIfTI-1 pair
+    /// (<c>ni1</c>) from plain Analyze 7.5, whose bytes past `descrip` are not a
+    /// qform/sform: Analyze gets no orientation frame (stored orientation).
+    /// vox_offset is an offset into the .img, usually 0.
+    public static MiqImage ParsePair(byte[] hdr, byte[] img, bool imgCompressed)
+    {
+        if (hdr.Length < 4) throw MiqException.TruncatedData();
+        var headerSizeLE = MiqBinaryReader.Int32(hdr, 0, littleEndian: true);
+        var headerSizeBE = MiqBinaryReader.Int32(hdr, 0, littleEndian: false);
+        if (headerSizeLE != 348 && headerSizeBE != 348)
+            throw MiqException.InvalidHeaderSize(headerSizeLE);
+
+        var isNifti = hdr.Length >= 348 && hdr[344] == 'n' && hdr[345] == 'i' && hdr[346] == '1';
+        var label = (isNifti ? "NIfTI-1 pair" : "Analyze 7.5") + (imgCompressed ? ", compressed .img" : "");
+        var header = ParseNifti1Header(hdr, littleEndian: headerSizeLE == 348, label, pair: true, analyze: !isNifti);
+        MiqParser.ValidateDimensionExtent(header.Dimensions, header.Datatype.BytesPerVoxel());
+        MiqParser.ValidateSlicePlaneExtent(header.Width, header.Height, header.Depth);
+
+        var volumeBytes = (long)header.Width * header.Height * header.Depth
+                          * header.Datatype.BytesPerVoxel();
+        if (img.Length - (long)header.VoxOffset < volumeBytes)
+            throw MiqException.TruncatedData();
+
+        return new MiqImage
+        {
+            Header = header,
+            Storage = img,
+            PayloadOffset = header.VoxOffset,
+        };
+    }
+
     /// Pass <paramref name="compressed"/> correctly: partial loads keep this header
     /// as the displayed image's.
     public static MiqHeader ParseHeader(byte[] data, bool compressed = false)
@@ -58,7 +90,12 @@ public static class NiftiParser
 
     // ── NIfTI-1 (348-byte header) ────────────────────────────────────────────
 
-    private static MiqHeader ParseNifti1Header(byte[] data, bool littleEndian, string? formatLabel)
+    /// <param name="pair">vox_offset points into a separate .img, so it is not
+    /// floored to the header end.</param>
+    /// <param name="analyze">Plain Analyze 7.5: the qform/sform slots hold other
+    /// fields (orient, originator), so no orientation is read from them.</param>
+    private static MiqHeader ParseNifti1Header(byte[] data, bool littleEndian, string? formatLabel,
+        bool pair = false, bool analyze = false)
     {
         if (data.Length < 348) throw MiqException.TruncatedData();
 
@@ -73,14 +110,14 @@ public static class NiftiParser
         var (sclSlope, sclInter) = NormalizeScaling(
             MiqBinaryReader.Float32(data, 112, littleEndian),
             MiqBinaryReader.Float32(data, 116, littleEndian));
-        var qformCode = MiqBinaryReader.Int16(data, 252, littleEndian);
-        var sformCode = MiqBinaryReader.Int16(data, 254, littleEndian);
-        var quaternB = MiqBinaryReader.Float32(data, 256, littleEndian);
-        var quaternC = MiqBinaryReader.Float32(data, 260, littleEndian);
-        var quaternD = MiqBinaryReader.Float32(data, 264, littleEndian);
-        var srowX = MiqBinaryReader.Float32Array(data, 280, count: 4, littleEndian);
-        var srowY = MiqBinaryReader.Float32Array(data, 296, count: 4, littleEndian);
-        var srowZ = MiqBinaryReader.Float32Array(data, 312, count: 4, littleEndian);
+        var qformCode = analyze ? (short)0 : MiqBinaryReader.Int16(data, 252, littleEndian);
+        var sformCode = analyze ? (short)0 : MiqBinaryReader.Int16(data, 254, littleEndian);
+        var quaternB = analyze ? 0f : MiqBinaryReader.Float32(data, 256, littleEndian);
+        var quaternC = analyze ? 0f : MiqBinaryReader.Float32(data, 260, littleEndian);
+        var quaternD = analyze ? 0f : MiqBinaryReader.Float32(data, 264, littleEndian);
+        var srowX = analyze ? new float[4] : MiqBinaryReader.Float32Array(data, 280, count: 4, littleEndian);
+        var srowY = analyze ? new float[4] : MiqBinaryReader.Float32Array(data, 296, count: 4, littleEndian);
+        var srowZ = analyze ? new float[4] : MiqBinaryReader.Float32Array(data, 312, count: 4, littleEndian);
         var qfac = pixdim.Length > 0 ? pixdim[0] : 1f;
         var (frame, conflictingQform) = NiftiOrientationFrame(
             sformCode, srowX, srowY, srowZ, qformCode, quaternB, quaternC, quaternD, qfac);
@@ -91,7 +128,7 @@ public static class NiftiParser
             Dimensions = dimensions,
             Pixdim = new[] { pixdim[0], pixdim[1], pixdim[2], pixdim[3] },
             Datatype = datatype,
-            VoxOffset = Math.Max(352, voxOffset),
+            VoxOffset = pair ? voxOffset : Math.Max(352, voxOffset),
             SclSlope = sclSlope,
             SclInter = sclInter,
             QformCode = qformCode,

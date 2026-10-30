@@ -18,7 +18,7 @@ namespace QuickLook.Plugin.MIQ;
 public sealed class Plugin : IViewer
 {
     private static readonly string[] Suffixes =
-        [".nii", ".nii.gz", ".mgh", ".mgz", ".mgh.gz", ".mif", ".mif.gz", ".nrrd", ".mha"];
+        [".nii", ".nii.gz", ".mgh", ".mgz", ".mgh.gz", ".mif", ".mif.gz", ".nrrd", ".mha", ".mhd", ".nhdr"];
 
     private MiqPreviewControl? _control;
     // Retain the parsed volume for the viewer's lifetime — it owns the (large)
@@ -59,7 +59,11 @@ public sealed class Plugin : IViewer
         foreach (var s in Suffixes)
             if (path.EndsWith(s, StringComparison.OrdinalIgnoreCase))
                 return true;
-        return false;
+        // Split formats. `.hdr` is also Radiance HDR and ENVI, so sniff it; data
+        // files (.img, .raw, …) only when a sibling header claims them.
+        if (path.EndsWith(".hdr", StringComparison.OrdinalIgnoreCase))
+            return DetachedData.LooksLikeAnalyzeHeader(path);
+        return DetachedData.HeaderFor(path) is not null;
     }
 
     public void Prepare(string path, ContextObject context)

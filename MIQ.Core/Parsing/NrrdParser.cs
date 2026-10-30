@@ -4,15 +4,16 @@ using System.Text;
 namespace MIQ.Parsing;
 
 /// <summary>
-/// NRRD parser (single-file <c>.nrrd</c> only).
+/// NRRD parser: self-contained <c>.nrrd</c>, and detached <c>.nhdr</c> headers with
+/// a single data file (see <see cref="DetachedData"/>).
 /// Direct port of MIQCore's <c>MIQParser+NRRD.swift</c>.
 ///
 /// An NRRD file is an ASCII header (magic line <c>NRRD000x</c> followed by
 /// <c>key: value</c> fields) terminated by a blank line, then binary voxel data.
 /// Data may be stored <c>raw</c> or <c>gzip</c>-compressed in the payload segment
 /// (this is independent of any file-level gzip — a plain <c>.nrrd</c> is never
-/// whole-file compressed). Detached headers (<c>.nhdr</c> / <c>data file:</c>) are
-/// out of scope.
+/// whole-file compressed). Multi-file data (<c>data file: LIST</c> or a format
+/// string) is out of scope.
 /// </summary>
 public static class NrrdParser
 {
@@ -35,27 +36,46 @@ public static class NrrdParser
         public float[]? Spacings { get; init; }
         /// The `content:` field.
         public string? Content { get; init; }
+        /// `data file:` of a detached header; null for a self-contained file.
+        public string? DataFile { get; init; }
+        /// `line skip:` / `byte skip:`, applied to the detached data file only.
+        public int LineSkip { get; init; }
+        public long ByteSkip { get; init; }
     }
 
     // ── Public entry points ──────────────────────────────────────────────────
 
-    public static MiqImage Parse(byte[] data, string? formatLabel = null)
+    /// <param name="loadDataFile">Set for a detached <c>.nhdr</c> header: reads the
+    /// file `data file:` names. Null for <c>.nrrd</c>, which must be self-contained.</param>
+    public static MiqImage Parse(byte[] data, string? formatLabel = null,
+        Func<string, byte[]>? loadDataFile = null)
     {
-        var (nrrd, storage, payloadOffset) = LoadNrrd(data);
+        var (nrrd, storage, payloadOffset) = LoadNrrd(data, loadDataFile);
         return BuildImage(nrrd, storage, payloadOffset);
     }
 
     public static MiqHeader ParseHeader(byte[] data)
     {
-        var (nrrd, _, payloadOffset) = LoadNrrd(data);
+        var (nrrd, _, payloadOffset) = LoadNrrd(data, null);
         return BuildMiqHeader(nrrd, payloadOffset).Header;
+    }
+
+    /// The `data file:` value of a detached header, or null when there is none.
+    /// Lets the plugin check that a <c>.raw</c> belongs to a sibling <c>.nhdr</c>.
+    internal static string? DataFileName(byte[] header)
+    {
+        var (headerText, _) = SplitHeader(header, detached: true);
+        var fields = ParseFields(headerText.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries));
+        return DataFileField(fields) is { } name && !DetachedData.IsMultiFile(name) ? name : null;
     }
 
     // ── Loading ──────────────────────────────────────────────────────────────
 
-    private static (NrrdParsedHeader nrrd, byte[] storage, int payloadOffset) LoadNrrd(byte[] data)
+    private static (NrrdParsedHeader nrrd, byte[] storage, int payloadOffset) LoadNrrd(
+        byte[] data, Func<string, byte[]>? loadDataFile)
     {
-        var (headerText, payloadIndex) = SplitHeader(data);
+        var detached = loadDataFile is not null;
+        var (headerText, payloadIndex) = SplitHeader(data, detached);
         var lines = headerText.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
         if (lines.Length == 0 || !lines[0].StartsWith("NRRD000", StringComparison.Ordinal))
@@ -63,7 +83,23 @@ public static class NrrdParser
                 "NRRD magic line not found; file does not appear to be NRRD format.");
 
         var fields = ParseFields(lines);
-        var nrrd = BuildParsedHeader(fields);
+        var nrrd = BuildParsedHeader(fields, detached);
+
+        // Detached: the voxels are in the named file, after `line skip` lines and,
+        // for raw data, `byte skip` bytes (-1 = the file's tail). For gzip the byte
+        // skip applies to the decompressed stream.
+        var byteSkip = 0L;
+        if (nrrd.DataFile is { } dataFile)
+        {
+            data = loadDataFile!(dataFile);
+            payloadIndex = SkipLines(data, nrrd.LineSkip);
+            byteSkip = nrrd.ByteSkip;
+            if (nrrd.Encoding == NrrdEncoding.Raw)
+            {
+                payloadIndex = SkipBytes(nrrd, data.Length, payloadIndex, byteSkip);
+                byteSkip = 0;
+            }
+        }
 
         switch (nrrd.Encoding)
         {
@@ -76,17 +112,47 @@ public static class NrrdParser
                 if (!MiqBinaryReader.IsLikelyGzip(compressed))
                     throw new MiqException(
                         "NRRD encoding is gzip but gzip magic bytes are missing in payload.");
-                return (nrrd, MiqBinaryReader.Gunzip(compressed), 0);
+                var inflated = MiqBinaryReader.Gunzip(compressed);
+                if (byteSkip < 0 || byteSkip > inflated.Length) throw MiqException.TruncatedData();
+                return (nrrd, inflated, (int)byteSkip);
 
             default:
                 throw new MiqException("NRRD: unknown encoding.");
         }
     }
 
-    // Returns the header text and the byte offset where the payload begins.
-    private static (string headerText, int payloadIndex) SplitHeader(byte[] data)
+    private static int SkipLines(byte[] data, int lines)
+    {
+        var index = 0;
+        for (var i = 0; i < lines; i++)
+        {
+            var newline = Array.IndexOf(data, (byte)0x0A, index);
+            if (newline < 0) throw MiqException.TruncatedData();
+            index = newline + 1;
+        }
+        return index;
+    }
+
+    private static int SkipBytes(NrrdParsedHeader nrrd, int dataLength, int index, long byteSkip)
+    {
+        if (byteSkip == -1)
+        {
+            long payloadBytes = nrrd.Datatype.BytesPerVoxel();
+            foreach (var s in nrrd.Sizes) payloadBytes *= s;
+            if (dataLength - (long)index < payloadBytes) throw MiqException.TruncatedData();
+            return (int)(dataLength - payloadBytes);
+        }
+        if (byteSkip < 0 || byteSkip > dataLength - (long)index) throw MiqException.TruncatedData();
+        return index + (int)byteSkip;
+    }
+
+    // Returns the header text and the byte offset where the payload begins. A
+    // detached header may simply end at end of file, without a blank line.
+    private static (string headerText, int payloadIndex) SplitHeader(byte[] data, bool detached = false)
     {
         var (headerEnd, payloadIndex) = FirstBlankLine(data);
+        if (headerEnd < 0 && detached)
+            return (Encoding.UTF8.GetString(data, 0, data.Length), data.Length);
         if (headerEnd < 0)
             throw new MiqException(
                 "NRRD header is missing the blank-line separator; detached headers (.nhdr) are not supported.");
@@ -133,13 +199,26 @@ public static class NrrdParser
         return fields;
     }
 
-    private static NrrdParsedHeader BuildParsedHeader(Dictionary<string, string> fields)
+    private static string? DataFileField(Dictionary<string, string> fields) =>
+        fields.TryGetValue("data file", out var dataFile) || fields.TryGetValue("datafile", out dataFile)
+            ? dataFile
+            : null;
+
+    private static NrrdParsedHeader BuildParsedHeader(Dictionary<string, string> fields, bool detached)
     {
-        // Reject detached headers early.
-        if (fields.TryGetValue("data file", out var dataFile) ||
-            fields.TryGetValue("datafile", out dataFile))
+        // A `data file:` in a self-contained .nrrd is rejected early.
+        var dataFile = DataFileField(fields);
+        if (dataFile is not null && !detached)
             throw new MiqException(
                 $"NRRD detached header (data file: {dataFile}) is not supported; use a self-contained .nrrd file.");
+        if (dataFile is not null && DetachedData.IsMultiFile(dataFile))
+            throw new MiqException(
+                $"NRRD split across several data files (data file: {dataFile}) is not supported.");
+        if (dataFile is null && detached)
+            throw new MiqException("NRRD detached header has no 'data file' field.");
+        var lineSkip = SkipField(fields, "line skip", "lineskip");
+        var byteSkip = SkipField(fields, "byte skip", "byteskip");
+        if (lineSkip < 0) throw new MiqException("NRRD 'line skip' must not be negative.");
 
         var encodingStr = (fields.TryGetValue("encoding", out var e) ? e : "raw").ToLowerInvariant();
         var encoding = encodingStr switch
@@ -191,8 +270,17 @@ public static class NrrdParser
             ToRasSigns = toRasSigns,
             Spacings = spacings,
             Content = fields.TryGetValue("content", out var content) ? content : null,
+            DataFile = dataFile,
+            LineSkip = (int)Math.Min(lineSkip, int.MaxValue),
+            ByteSkip = byteSkip,
         };
     }
+
+    private static long SkipField(Dictionary<string, string> fields, string key, string alias) =>
+        (fields.TryGetValue(key, out var v) || fields.TryGetValue(alias, out v))
+        && long.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n)
+            ? n
+            : 0;
 
     // ── Image construction ───────────────────────────────────────────────────
 
@@ -262,7 +350,13 @@ public static class NrrdParser
             SrowX = srowX,
             SrowY = srowY,
             SrowZ = srowZ,
-            FormatLabel = nrrd.Encoding == NrrdEncoding.Gzip ? "Compressed NRRD" : null,
+            FormatLabel = (nrrd.Encoding == NrrdEncoding.Gzip, nrrd.DataFile is not null) switch
+            {
+                (true, true) => "Compressed NRRD (detached)",
+                (true, false) => "Compressed NRRD",
+                (false, true) => "NRRD (detached)",
+                _ => null,
+            },
             OrientationFrame = orientationFrame,
             Comment = nrrd.Content is { } c ? MiqParser.HeaderComment([c]) : null,
             FileIndexAxes = fileIndexAxes,

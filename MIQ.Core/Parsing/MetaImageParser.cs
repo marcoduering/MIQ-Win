@@ -9,9 +9,10 @@ namespace MIQ.Parsing;
 ///
 /// A text header of <c>Key = Value</c> lines that ends with
 /// <c>ElementDataFile = LOCAL</c>, followed by the voxels in the same file — raw,
-/// or a zlib stream when <c>CompressedData = True</c>. The detached <c>.mhd</c> +
-/// <c>.raw</c> pair is not supported (parity with macOS, where Quick Look grants
-/// access to the selected file only).
+/// or a zlib stream when <c>CompressedData = True</c>. A detached <c>.mhd</c> names
+/// its data file instead (<c>.raw</c>, or <c>.zraw</c> when compressed), read through
+/// the loader <see cref="DetachedData"/> supplies (Windows-only: macOS Quick Look
+/// grants access to the selected file only).
 /// </summary>
 public static class MetaImageParser
 {
@@ -33,19 +34,31 @@ public static class MetaImageParser
         public float[]? Transform { get; init; }
         /// The `Comment` field.
         public string? Comment { get; init; }
+        /// `ElementDataFile` of a detached header; null when LOCAL.
+        public string? DataFile { get; init; }
+        /// `HeaderSize`: bytes to skip in a detached data file (-1 = take the tail).
+        public long? HeaderSize { get; init; }
     }
 
     // ── Public entry point ───────────────────────────────────────────────────
 
-    public static MiqImage Parse(byte[] data)
+    /// <param name="loadDataFile">Set for a detached <c>.mhd</c> header: reads the
+    /// file `ElementDataFile` names. Null for <c>.mha</c>, which must be LOCAL.</param>
+    public static MiqImage Parse(byte[] data, Func<string, byte[]>? loadDataFile = null)
     {
         var (fields, payloadIndex) = SplitHeader(data);
-        var meta = BuildParsedHeader(fields);
+        var meta = BuildParsedHeader(fields, detached: loadDataFile is not null);
 
         // Bounded by ValidateDimensionExtent in BuildParsedHeader.
         long payloadBytes = meta.ElementType.BytesPerVoxel() * (long)meta.Channels;
         foreach (var s in meta.Sizes) payloadBytes *= s;
         if (payloadBytes <= 0) throw MiqException.InvalidDimensions();
+
+        if (meta.DataFile is { } dataFile)
+        {
+            data = loadDataFile!(dataFile);
+            payloadIndex = DetachedPayloadIndex(meta, data.Length, payloadBytes);
+        }
 
         byte[] storage;
         int payloadOffset;
@@ -77,6 +90,34 @@ public static class MetaImageParser
             PayloadOffset = payloadOffset,
             ElementStrides = Strides(meta),
         };
+    }
+
+    /// Where the voxels start in a detached data file. `HeaderSize` skips that many
+    /// bytes, and -1 means "the voxels are the file's tail". A compressed file is a
+    /// zlib stream from its first byte.
+    private static int DetachedPayloadIndex(MetaImageParsedHeader meta, int dataLength, long payloadBytes)
+    {
+        if (meta.Compressed) return 0;
+        var skip = meta.HeaderSize ?? 0;
+        if (skip == -1)
+        {
+            if (dataLength < payloadBytes) throw MiqException.TruncatedData();
+            return (int)(dataLength - payloadBytes);
+        }
+        if (skip < 0 || skip > dataLength) throw MiqException.TruncatedData();
+        return (int)skip;
+    }
+
+    /// The `ElementDataFile` value of a header, or null when it is LOCAL or missing.
+    /// Lets the plugin check that a <c>.raw</c> belongs to a sibling <c>.mhd</c>.
+    internal static string? DataFileName(byte[] header)
+    {
+        var (fields, _) = SplitHeader(header);
+        return fields.TryGetValue("ElementDataFile", out var name)
+               && !name.Equals("LOCAL", StringComparison.OrdinalIgnoreCase)
+               && !DetachedData.IsMultiFile(name)
+            ? name
+            : null;
     }
 
     // ── Header split ─────────────────────────────────────────────────────────
@@ -118,16 +159,22 @@ public static class MetaImageParser
 
     // ── Header fields ────────────────────────────────────────────────────────
 
-    private static MetaImageParsedHeader BuildParsedHeader(Dictionary<string, string> fields)
+    private static MetaImageParsedHeader BuildParsedHeader(Dictionary<string, string> fields, bool detached)
     {
         if (fields.TryGetValue("ObjectType", out var objectType) &&
             !objectType.Equals("Image", StringComparison.OrdinalIgnoreCase))
             throw new MiqException($"MetaImage object type '{objectType}' is not an image.");
 
         var dataFile = fields.TryGetValue("ElementDataFile", out var df) ? df : "";
-        if (!dataFile.Equals("LOCAL", StringComparison.OrdinalIgnoreCase))
+        var isLocal = dataFile.Equals("LOCAL", StringComparison.OrdinalIgnoreCase);
+        if (!isLocal && !detached)
             throw new MiqException(
                 $"MetaImage with a separate data file (ElementDataFile = {dataFile}) is not supported; use a self-contained .mha file.");
+        if (!isLocal && DetachedData.IsMultiFile(dataFile))
+            throw new MiqException(
+                $"MetaImage split across several data files (ElementDataFile = {dataFile}) is not supported.");
+        long? headerSize = fields.TryGetValue("HeaderSize", out var hs) &&
+            long.TryParse(hs, NumberStyles.Integer, CultureInfo.InvariantCulture, out var hsv) ? hsv : null;
         if (fields.TryGetValue("BinaryData", out var binary) && !Bool(binary))
             throw new MiqException("MetaImage ASCII data (BinaryData = False) is not supported.");
 
@@ -177,6 +224,8 @@ public static class MetaImageParser
             Origin = origin,
             Transform = transform,
             Comment = fields.TryGetValue("Comment", out var comment) ? comment : null,
+            DataFile = isLocal ? null : dataFile,
+            HeaderSize = headerSize,
         };
     }
 
@@ -257,10 +306,18 @@ public static class MetaImageParser
             SrowX = srowX,
             SrowY = srowY,
             SrowZ = srowZ,
-            FormatLabel = meta.Compressed ? "Compressed MetaImage" : null,
+            FormatLabel = FormatLabel(meta),
             OrientationFrame = orientationFrame,
             Comment = meta.Comment is { } c ? MiqParser.HeaderComment([c]) : null,
         };
+    }
+
+    /// Null keeps the file kind's name ("MetaImage").
+    private static string? FormatLabel(MetaImageParsedHeader meta)
+    {
+        var detached = meta.DataFile is not null;
+        if (meta.Compressed) return detached ? "Compressed MetaImage (detached)" : "Compressed MetaImage";
+        return detached ? "MetaImage (detached)" : null;
     }
 
     // ── Field value parsers ──────────────────────────────────────────────────

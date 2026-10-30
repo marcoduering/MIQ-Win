@@ -17,6 +17,13 @@ public enum MiqFileKind
     MifGz,
     Nrrd,
     Mha,
+    // Split formats: a header whose voxels live in a sibling file (DetachedData).
+    /// Analyze 7.5 or NIfTI-1 pair header (<c>.hdr</c> + <c>.img</c>).
+    AnalyzeHdr,
+    /// Detached MetaImage header (<c>.mhd</c> + <c>.raw</c>/<c>.zraw</c>).
+    Mhd,
+    /// Detached NRRD header (<c>.nhdr</c> + <c>.raw</c>/<c>.raw.gz</c>).
+    Nhdr,
 }
 
 public static class MiqFileKindExtensions
@@ -38,6 +45,9 @@ public static class MiqFileKindExtensions
             "mif" => MiqFileKind.Mif,
             "nrrd" => MiqFileKind.Nrrd,
             "mha" => MiqFileKind.Mha,
+            "hdr" => MiqFileKind.AnalyzeHdr,
+            "mhd" => MiqFileKind.Mhd,
+            "nhdr" => MiqFileKind.Nhdr,
             _ => null,
         };
     }
@@ -57,7 +67,9 @@ public static class MiqFileKindExtensions
         MiqFileKind.Mif => "MRtrix MIF",
         MiqFileKind.MifGz => "Compressed MRtrix MIF",
         MiqFileKind.Nrrd => "NRRD",
-        MiqFileKind.Mha => "MetaImage",
+        MiqFileKind.Mha or MiqFileKind.Mhd => "MetaImage",
+        MiqFileKind.AnalyzeHdr => "Analyze 7.5",
+        MiqFileKind.Nhdr => "NRRD",
         _ => throw new ArgumentOutOfRangeException(nameof(kind)),
     };
 }
