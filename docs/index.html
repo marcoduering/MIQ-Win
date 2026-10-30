@@ -384,11 +384,11 @@
       </div>
       <div class="fmt">
         <span class="badge">🧪</span>
-        <div><div class="name">Split formats <span class="exp">Experimental</span></div><div class="ext"><code>.hdr</code>+<code>.img</code> (Analyze 7.5 / NIfTI-1 pair) <code>.mhd</code>+<code>.raw</code> <code>.nhdr</code>+data</div></div>
+        <div><div class="name">Split formats <span class="exp">Experimental</span></div><div class="ext"><code>.hdr</code> <code>.mhd</code> <code>.nhdr</code> + data file</div></div>
       </div>
       <div class="fmt wide">
         <span class="badge">ℹ️</span>
-        <div><div class="name">About split formats</div><div class="sub">A header plus a separate data file. Press <kbd>Space</kbd> on either one. A data file such as <code>.img</code> or <code>.raw</code> is only previewed when a header with the same name sits next to it and points at it, so camera RAW files and disk images are left alone. This support is new and less widely tested; please <a href="https://github.com/marcoduering/MIQ-Win/issues">report</a> files that fail or look wrong.</div></div>
+        <div><div class="name">About split formats</div><div class="sub">A header plus a separate data file: Analyze 7.5 or NIfTI-1 pair (<code>.hdr</code> + <code>.img</code>), MetaImage (<code>.mhd</code> + <code>.raw</code>/<code>.zraw</code>) and NRRD (<code>.nhdr</code> + data file). Press <kbd>Space</kbd> on either one. A data file such as <code>.img</code> or <code>.raw</code> is only previewed when a header with the same name sits next to it and points at it, so camera RAW files and disk images are left alone. This support is new and less widely tested; please <a href="https://github.com/marcoduering/MIQ-Win/issues">report</a> files that fail or look wrong.</div></div>
       </div>
     </div>
     <p class="note">MIQ-Win only supports volume files in research formats, DICOM is currently not supported.<br />The plugin relies on the file extension to determine the format, so it's important that files have the correct extension.</p>
