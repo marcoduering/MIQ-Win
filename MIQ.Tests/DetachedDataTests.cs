@@ -344,10 +344,11 @@ public sealed class DetachedDataTests : IDisposable
     [InlineData("C:v.raw")]
     [InlineData("a|b.raw")]
     [InlineData("a\"b.raw")]
+    [InlineData("a\0b.raw")] // the one name net8's path APIs also reject (ArgumentException)
     public void OddDataFileNames_FailWithAMessage(string dataFile)
     {
-        // net462 throws ArgumentException for some of these; it must surface as a
-        // MiqException either way, never a raw BCL exception.
+        // net462 throws ArgumentException for several of these; it must surface as
+        // a MiqException either way, never a raw BCL exception.
         var mhd = WriteText("odd.mhd", Mhd(dataFile));
         Assert.Throws<MiqException>(() => MiqParser.Parse(mhd));
     }

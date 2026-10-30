@@ -162,6 +162,29 @@ volume 0 *is* the whole payload), the full parse runs up front and the scrubber 
 live immediately. See *Known limitations* for the permanent (`ExpansionBlocked`)
 variant.
 
+Split pairs (`.hdr`/`.img`, `.mhd`/`.raw`, `.nhdr`/`.raw`) take the same route via
+`ParseDetachedFirstVolume` when the data file is uncompressed, volume-major and
+above the threshold. Each parser's `RawLayout` builds the header with the same code
+as its full parse, so the first view matches. Compressed data, NRRD with the list
+axis first (interleaved volumes) and `line skip` load fully.
+
+### Split (detached) formats
+
+Windows-only (macOS Quick Look can read only the selected file). `DetachedData`
+owns the file plumbing; the parsers take a loader delegate and never open files
+themselves.
+
+- **Claiming.** Headers match by suffix; a `.hdr` must also parse as an Analyze /
+  NIfTI-1 pair header (Radiance HDR and ENVI share the extension). A data file is
+  claimed only via `HeaderFor`: a same-stem sibling header that resolves to *this*
+  file. Never on the extension alone — `.raw` and `.img` are generic.
+- **Path safety.** `Resolve` accepts only relative names that stay inside the
+  header's folder. A rooted or UNC name would let a downloaded header read
+  arbitrary files or send credentials to a remote host on preview.
+- **Analyze vs NIfTI pair.** The `ni1` magic decides. Plain Analyze gets no
+  orientation frame: bytes 252+ are `orient`/`originator`, not qform/sform. A pair's
+  `vox_offset` points into the `.img` and is not floored to the header size.
+
 **Phase 2 is lazy.** The full load does *not* run automatically — that made flicking
 through previews stutter, since every glance kicked off a background decompress, and
 native libdeflate can't be cancelled mid-call so orphaned loads piled up. Instead the
