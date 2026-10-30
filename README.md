@@ -13,7 +13,7 @@ MIQ-Win is the Windows counterpart to [**MIQ**](https://github.com/marcoduering/
 ## Main Features and Supported Formats
 
 - **Instant, interactive preview** — press Space in Explorer for the 2×2 orthogonal slice and metadata view
-- **Built for speed** — native [libdeflate](https://github.com/ebiggers/libdeflate) gzip decompression, and multi-volume NIfTI (and large uncompressed split files) that preview their first volume without waiting for the rest
+- **Built for speed** — native [libdeflate](https://github.com/ebiggers/libdeflate) gzip decompression, and multi-volume NIfTI (and large uncompressed split-format files) that preview their first volume without waiting for the rest
 - **4D support** — scrub through timepoints/volumes interactively
 - **Segmentation coloring** — including automatic label-color detection for FreeSurfer-style parcellations
 - **Interactive controls** — slice scrolling, linked crosshairs, and window/level adjustment right in the preview
@@ -25,11 +25,17 @@ Supported formats:
 - :white_check_mark: **NIfTI-1 & NIfTI-2** — `.nii`, `.nii.gz`
 - :white_check_mark: **FreeSurfer** — `.mgh`, `.mgz`, `.mgh.gz`
 - :white_check_mark: **MRtrix** — `.mif`, `.mif.gz`
-- :white_check_mark: **NRRD** — `.nrrd`, and detached `.nhdr` + data file *(`raw` and `gzip` encodings)*
-- :white_check_mark: **ITK MetaImage** — `.mha`, and detached `.mhd` + `.raw`/`.zraw` *(raw or zlib-compressed data)*
-- :white_check_mark: **Analyze 7.5 & NIfTI-1 pair** — `.hdr` + `.img` (or `.img.gz`)
+- :white_check_mark: **NRRD** — `.nrrd` *(`raw` and `gzip` encodings)*
+- :white_check_mark: **ITK MetaImage** — `.mha` *(raw or zlib-compressed data)*
+- :test_tube: **Split formats** *(experimental)* — header plus a separate data file:
+  - **NRRD** — `.nhdr` + data file
+  - **ITK MetaImage** — `.mhd` + `.raw`/`.zraw`
+  - **Analyze 7.5 & NIfTI-1 pair** — `.hdr` + `.img` (or `.img.gz`)
 
 Most formats are supported uncompressed and gzip-compressed. The plugin determines the format from the file extension, so it is **important that files have the correct extensions**. Compound extensions like `.nii.gz` work directly — the plugin matches by path suffix, independent of Windows file associations.
+
+> [!NOTE]
+> Split-format support is **experimental**. It has been tested less widely than the single-file formats; please [report](https://github.com/marcoduering/MIQ-Win/issues) files that fail to preview or look wrong.
 
 **Split formats** (a header plus a separate data file) preview from **either file**: press Space on the `.hdr`, `.mhd` or `.nhdr`, or on its data file. A data file (`.img`, `.raw`, …) is only previewed when a header with the same name sits next to it and points at it, so camera RAW files, disk images and the like are left to other viewers. The data file must be in the header's folder or below it. Data split across several files (`LIST`, numbered patterns) is not supported. Plain Analyze files carry no reliable orientation and are shown as stored.
 
@@ -100,7 +106,7 @@ Detection is conservative, so ordinary intensity images stay grayscale.
 
 ### Performance
 
-Uncompressed files load instantly. All gzip-compressed files (`.nii.gz`, `.mgh.gz`/`.mgz`, `.mif.gz`) are decompressed with native [libdeflate](https://github.com/ebiggers/libdeflate) — far faster than .NET Framework's built-in gzip. Multi-volume NIfTI previews even quicker because only the **first volume** is shown for the initial view — for every `.nii.gz`, and for uncompressed `.nii` over 150 MB. This is especially helpful on slow or network storage, where the preview appears without waiting for the whole file, and you can flick through many large files seeing just the first volume of each. The remaining volumes load on demand the first time you use the volume scrubber. Very large `.mgz` or `.mif.gz` files are decompressed in full up front, so they may take a few seconds. Extremely large 4-D series (over ~2 GB) are previewed using their first volume only — the metadata panel notes this and the volume scrubber is hidden.
+Uncompressed files load instantly. All gzip-compressed files (`.nii.gz`, `.mgh.gz`/`.mgz`, `.mif.gz`) are decompressed with native [libdeflate](https://github.com/ebiggers/libdeflate) — far faster than .NET Framework's built-in gzip. Multi-volume NIfTI previews even quicker because only the **first volume** is shown for the initial view — for every `.nii.gz`, and for uncompressed `.nii` over 150 MB (likewise for uncompressed split-format data files over 150 MB). This is especially helpful on slow or network storage, where the preview appears without waiting for the whole file, and you can flick through many large files seeing just the first volume of each. The remaining volumes load on demand the first time you use the volume scrubber. Very large `.mgz` or `.mif.gz` files are decompressed in full up front, so they may take a few seconds. Extremely large 4-D series (over ~2 GB) are previewed using their first volume only — the metadata panel notes this and the volume scrubber is hidden.
 
 ## Active Development
 

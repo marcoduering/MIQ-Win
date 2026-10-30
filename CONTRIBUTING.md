@@ -170,7 +170,7 @@ axis first (interleaved volumes) and `line skip` load fully.
 
 ### Split (detached) formats
 
-Windows-only (macOS Quick Look can read only the selected file). `DetachedData`
+**Experimental** (labelled so in the README and on the website). Windows-only (macOS Quick Look can read only the selected file). `DetachedData`
 owns the file plumbing; the parsers take a loader delegate and never open files
 themselves.
 
@@ -213,7 +213,9 @@ chunks), so navigating away abandons it promptly.
   ISIZE = 0 and use a streaming fallback, but the allocation may still exhaust memory.
 - **NRRD ASCII / hex / bzip2 encoding:** unsupported by design. Re-save with
   `encoding: raw` or `encoding: gzip`.
-- **Detached NRRD headers (`.nhdr`):** out of scope; use self-contained `.nrrd`.
+- **Split formats:** data split across several files (NRRD `LIST` / format
+  strings), `.mih` and `.hdr.gz` are unsupported. Symlinks and junctions inside the
+  header's folder are not resolved.
 - **RGBA NIfTI alpha:** dropped — `rgba32` renders in colour but opaque.
 - **NIfTI-2 with >4 dimensions:** only the first four axes are previewed.
 
