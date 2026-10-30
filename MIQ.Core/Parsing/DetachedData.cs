@@ -188,7 +188,9 @@ public static class DetachedData
     /// Multi-file data (MetaImage `LIST` or a `%d` pattern, NRRD `LIST` or a
     /// format string) is out of scope.
     internal static bool IsMultiFile(string name) =>
-        name.StartsWith("LIST", StringComparison.OrdinalIgnoreCase) || name.IndexOf('%') >= 0;
+        (name.StartsWith("LIST", StringComparison.OrdinalIgnoreCase)
+         && (name.Length == 4 || char.IsWhiteSpace(name[4])))
+        || name.IndexOf('%') >= 0;
 }
 
 /// Where a detached header's voxels are, for the volume-0-first load: the image

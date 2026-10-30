@@ -115,9 +115,11 @@ public static class NiftiParser
         var pixdim = MiqBinaryReader.Float32Array(data, 76, count: 8, littleEndian);
         // float→double widening is exact, so the check below sees the stored value.
         var voxOffset = NarrowVoxOffset(MiqBinaryReader.Float32(data, 108, littleEndian));
+        // SPM Analyze uses funused1 as a slope, but funused2 is unused, not an
+        // intercept. Ignore it before normalization so junk cannot discard the slope.
         var (sclSlope, sclInter) = NormalizeScaling(
             MiqBinaryReader.Float32(data, 112, littleEndian),
-            MiqBinaryReader.Float32(data, 116, littleEndian));
+            analyze ? 0f : MiqBinaryReader.Float32(data, 116, littleEndian));
         var qformCode = analyze ? (short)0 : MiqBinaryReader.Int16(data, 252, littleEndian);
         var sformCode = analyze ? (short)0 : MiqBinaryReader.Int16(data, 254, littleEndian);
         var quaternB = analyze ? 0f : MiqBinaryReader.Float32(data, 256, littleEndian);

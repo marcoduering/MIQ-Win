@@ -135,6 +135,17 @@ public sealed class DetachedPartialLoadTests : IDisposable
     }
 
     [Fact]
+    public void Nhdr_TailOffset_IgnoresLineSkip_ForVolume0First()
+    {
+        var nhdr = WriteText("tail.nhdr",
+            Nhdr("tail.raw", extra: "line skip: 100\nbyte skip: -1\n"));
+        Write("tail.raw", [.. new byte[11], .. Voxels()]);
+        var partial = MiqParser.ParsePartial(nhdr);
+        Assert.Equal(11, partial.PayloadOffset);
+        AssertMatchesFullVolume0(partial, MiqParser.Parse(nhdr));
+    }
+
+    [Fact]
     public void Analyze_LoadsVolume0First_WithVoxOffset()
     {
         var hdr = Write("a.hdr", AnalyzeHeader(voxOffset: 8));

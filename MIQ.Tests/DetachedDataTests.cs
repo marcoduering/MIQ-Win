@@ -184,6 +184,37 @@ public sealed class DetachedDataTests : IDisposable
         Assert.Contains("several data files", e.Message);
     }
 
+    [Theory]
+    [InlineData("listing.raw", ".mhd")]
+    [InlineData("LIST.raw", ".mhd")]
+    [InlineData("listing.raw", ".nhdr")]
+    [InlineData("LIST.raw", ".nhdr")]
+    public void ListPrefixedFileName_IsLoadedAndClaimed(string dataFile, string extension)
+    {
+        var header = WriteText(Path.GetFileNameWithoutExtension(dataFile) + extension,
+            extension == ".mhd" ? Mhd(dataFile) : Nhdr(dataFile));
+        var raw = Write(dataFile, Voxels());
+
+        AssertVoxels(MiqParser.Parse(header));
+        Assert.Equal(header, DetachedData.HeaderFor(raw));
+        AssertVoxels(MiqParser.Parse(raw));
+    }
+
+    [Theory]
+    [InlineData("LIST", ".mhd")]
+    [InlineData("LIST 2", ".mhd")]
+    [InlineData("LIST\t2", ".mhd")]
+    [InlineData("LIST", ".nhdr")]
+    [InlineData("LIST 2", ".nhdr")]
+    [InlineData("LIST\t2", ".nhdr")]
+    public void ListDeclaration_IsStillRejected(string dataFile, string extension)
+    {
+        var header = WriteText("multi" + extension,
+            extension == ".mhd" ? Mhd(dataFile) : Nhdr(dataFile));
+        var e = Assert.Throws<MiqException>(() => MiqParser.Parse(header));
+        Assert.Contains("several data files", e.Message);
+    }
+
     [Fact]
     public void Mha_WithSeparateDataFile_IsStillRejected()
     {
@@ -217,6 +248,23 @@ public sealed class DetachedDataTests : IDisposable
         WriteText("l.nhdr", Nhdr("l.raw", extra: "line skip: 2\n"));
         Write("l.raw", [.. "a\nbb\n"u8.ToArray(), .. Voxels()]);
         AssertVoxels(MiqParser.Parse(Path.Combine(_dir, "l.nhdr")));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(17)]
+    public void Nhdr_ByteSkipMinusOne_IgnoresLineSkip(int prefix)
+    {
+        var header = WriteText("tail.nhdr",
+            Nhdr("tail.raw", extra: "line skip: 100\nbyte skip: -1\n"));
+        Write("tail.raw", [.. new byte[prefix], .. Voxels()]);
+        var image = MiqParser.Parse(header);
+        Assert.Equal(prefix, image.PayloadOffset);
+        AssertVoxels(image);
+
+        // Ignoring line skip must not hide a genuinely truncated payload.
+        Write("tail.raw", Voxels()[..^1]);
+        Assert.Throws<MiqException>(() => MiqParser.Parse(header));
     }
 
     [Fact]
@@ -262,6 +310,42 @@ public sealed class DetachedDataTests : IDisposable
 
         Assert.Equal(hdr, DetachedData.HeaderFor(img));
         AssertVoxels(MiqParser.Parse(img));
+    }
+
+    [Theory]
+    [InlineData(100f)]
+    [InlineData(float.NaN)]
+    [InlineData(float.PositiveInfinity)]
+    public void Analyze_PreservesSpmSlope_AndIgnoresFunused2(float unused)
+    {
+        var header = AnalyzeHeader(nifti: false);
+        BinaryPrimitives.WriteSingleLittleEndian(header.AsSpan(112), 2f);
+        BinaryPrimitives.WriteSingleLittleEndian(header.AsSpan(116), unused);
+        var hdr = Write("scale.hdr", header);
+        Write("scale.img", Voxels());
+
+        var image = MiqParser.Parse(hdr);
+        Assert.Equal(2f, image.Header.SclSlope);
+        Assert.Equal(0f, image.Header.SclInter);
+        Assert.Equal(-14, new MiqVolume(image).VoxelValue(0, 0, 0, 0));
+    }
+
+    [Theory]
+    [InlineData(100f, 2f, 100f, 86)]
+    [InlineData(float.NaN, 0f, 0f, -7)]
+    public void NiftiPair_PreservesScalingRules(float intercept, float expectedSlope,
+        float expectedIntercept, int expectedVoxel)
+    {
+        var header = AnalyzeHeader(nifti: true);
+        BinaryPrimitives.WriteSingleLittleEndian(header.AsSpan(112), 2f);
+        BinaryPrimitives.WriteSingleLittleEndian(header.AsSpan(116), intercept);
+        var hdr = Write("scale.hdr", header);
+        Write("scale.img", Voxels());
+
+        var image = MiqParser.Parse(hdr);
+        Assert.Equal(expectedSlope, image.Header.SclSlope);
+        Assert.Equal(expectedIntercept, image.Header.SclInter);
+        Assert.Equal(expectedVoxel, new MiqVolume(image).VoxelValue(0, 0, 0, 0));
     }
 
     [Fact]

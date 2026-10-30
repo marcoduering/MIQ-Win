@@ -72,8 +72,8 @@ public static class NrrdParser
     /// For the volume-0-first load of a detached header: the image header, the data
     /// file and where its voxels start, without reading them. <paramref name="locate"/>
     /// resolves `data file:` to a path and that file's length. Null when the voxels
-    /// can't be read one volume at a time: gzip, a `line skip` (needs the data to
-    /// count lines), or a volume axis that isn't the slowest (e.g. a DWI list axis first).
+    /// can't be read one volume at a time: gzip, an effective `line skip` (needs
+    /// the data to count lines), or a volume axis that isn't the slowest.
     internal static DetachedLayout? RawLayout(byte[] header, Func<string, (string Path, long Length)> locate)
     {
         var (headerText, _) = SplitHeader(header, detached: true);
@@ -82,7 +82,8 @@ public static class NrrdParser
             throw new MiqException(
                 "NRRD magic line not found; file does not appear to be NRRD format.");
         var nrrd = BuildParsedHeader(ParseFields(lines), detached: true);
-        if (nrrd.Encoding != NrrdEncoding.Raw || nrrd.LineSkip > 0) return null;
+        if (nrrd.Encoding != NrrdEncoding.Raw
+            || (nrrd.LineSkip > 0 && nrrd.ByteSkip != -1)) return null;
 
         var (path, length) = locate(nrrd.DataFile!);
         var offset = SkipBytes(nrrd, length, 0, nrrd.ByteSkip);
@@ -116,8 +117,11 @@ public static class NrrdParser
         if (nrrd.DataFile is { } dataFile)
         {
             data = loadDataFile!(dataFile);
-            payloadIndex = SkipLines(data, nrrd.LineSkip);
             byteSkip = nrrd.ByteSkip;
+            // Raw tail-relative addressing ignores line skip entirely.
+            payloadIndex = nrrd.Encoding == NrrdEncoding.Raw && byteSkip == -1
+                ? 0
+                : SkipLines(data, nrrd.LineSkip);
             if (nrrd.Encoding == NrrdEncoding.Raw)
             {
                 // At most data.Length, so it fits an int.
@@ -166,7 +170,7 @@ public static class NrrdParser
         {
             long payloadBytes = nrrd.Datatype.BytesPerVoxel();
             foreach (var s in nrrd.Sizes) payloadBytes *= s;
-            if (dataLength - index < payloadBytes) throw MiqException.TruncatedData();
+            if (dataLength < payloadBytes) throw MiqException.TruncatedData();
             return dataLength - payloadBytes;
         }
         if (byteSkip < 0 || byteSkip > dataLength - index) throw MiqException.TruncatedData();
