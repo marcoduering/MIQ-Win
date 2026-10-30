@@ -62,8 +62,7 @@ public sealed class MiqMetadata
         var z = Pixdim(3);
         entries.Add(new("Spacing", string.Format(inv, "{0:0.00} x {1:0.00} x {2:0.00} mm", x, y, z)));
 
-        if (_orientation is { } o)
-            entries.Add(new("Orientation", o));
+        entries.Add(new("Orientation", _orientation ?? "?"));
 
         entries.Add(new("Datatype", _h.DatatypeLabel ?? _h.Datatype.Label()));
         entries.Add(new("Volumes", _h.Volumes.ToString(inv)));
