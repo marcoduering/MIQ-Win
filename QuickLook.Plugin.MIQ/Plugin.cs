@@ -59,11 +59,19 @@ public sealed class Plugin : IViewer
         foreach (var s in Suffixes)
             if (path.EndsWith(s, StringComparison.OrdinalIgnoreCase))
                 return true;
-        // Split formats. `.hdr` is also Radiance HDR and ENVI, so sniff it; data
-        // files (.img, .raw, …) only when a sibling header claims them.
-        if (path.EndsWith(".hdr", StringComparison.OrdinalIgnoreCase))
-            return DetachedData.LooksLikeAnalyzeHeader(path);
-        return DetachedData.HeaderFor(path) is not null;
+        // Split formats. `.hdr` is also Radiance HDR and ENVI, so it must parse as
+        // Analyze; data files (.img, .raw, …) only when a sibling header claims
+        // them. Other names cost no I/O. Never let a probe failure reach the host.
+        try
+        {
+            if (path.EndsWith(".hdr", StringComparison.OrdinalIgnoreCase))
+                return DetachedData.LooksLikeAnalyzeHeader(path);
+            return DetachedData.IsDataFileName(path) && DetachedData.HeaderFor(path) is not null;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     public void Prepare(string path, ContextObject context)

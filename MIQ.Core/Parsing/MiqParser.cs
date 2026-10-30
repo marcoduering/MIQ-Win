@@ -51,14 +51,7 @@ public static class MiqParser
     /// header that claims it (<see cref="DetachedData.HeaderFor"/>).
     public static MiqImage Parse(string filePath, CancellationToken ct = default)
     {
-        var kind = MiqFileKindExtensions.FromPath(filePath);
-        if (kind is null && DetachedData.HeaderFor(filePath) is { } header)
-        {
-            filePath = header;
-            kind = MiqFileKindExtensions.FromPath(header);
-        }
-        if (kind is not { } k) throw MiqException.UnsupportedFileFormat();
-
+        var k = ResolveKind(ref filePath);
         var data = LoadAndDecompress(filePath, k, ct);
         var formatLabel = k.IsCompressed() ? k.DisplayName() : null;
 
@@ -74,6 +67,81 @@ public static class MiqParser
             MiqFileKind.AnalyzeHdr                   => ParseAnalyzePair(filePath, data, ct),
             _ => throw MiqException.UnsupportedFileFormat(),
         };
+    }
+
+    /// The file kind of <paramref name="filePath"/>; a data file of a split pair is
+    /// replaced by the header that claims it.
+    private static MiqFileKind ResolveKind(ref string filePath)
+    {
+        var kind = MiqFileKindExtensions.FromPath(filePath);
+        if (kind is null && DetachedData.HeaderFor(filePath) is { } header)
+        {
+            filePath = header;
+            kind = MiqFileKindExtensions.FromPath(header);
+        }
+        return kind ?? throw MiqException.UnsupportedFileFormat();
+    }
+
+    private static bool IsSplit(MiqFileKind kind) =>
+        kind is MiqFileKind.AnalyzeHdr or MiqFileKind.Mhd or MiqFileKind.Nhdr;
+
+    /// Volume-0-first load of a split pair whose data file is uncompressed and
+    /// volume-major — the counterpart of <see cref="ParseNiftiFirstVolume"/>. Reads
+    /// the header, then exactly payload offset + volume 0 from the data file. The
+    /// header comes from the same code as a full parse, so the first view is
+    /// identical. Anything else (3-D, small, compressed, interleaved, or a data file
+    /// shorter than the header implies) falls back to a full <see cref="Parse"/>.
+    private static MiqImage ParseDetachedFirstVolume(string headerPath, MiqFileKind kind, CancellationToken ct)
+    {
+        DetachedLayout? layout;
+        try
+        {
+            var headerBytes = LoadAndDecompress(headerPath, kind, ct);
+            layout = kind switch
+            {
+                MiqFileKind.Mhd => MetaImageParser.RawLayout(headerBytes, DetachedData.Locator(headerPath)),
+                MiqFileKind.Nhdr => NrrdParser.RawLayout(headerBytes, DetachedData.Locator(headerPath)),
+                _ => AnalyzeLayout(headerPath, headerBytes),
+            };
+        }
+        catch (Exception e) when (e is not OperationCanceledException) { return Parse(headerPath, ct); }
+
+        if (layout is null || layout.Header.Volumes <= 1)
+            return Parse(headerPath, ct);
+
+        var fileLength = new FileInfo(layout.DataPath).Length;
+        if (fileLength <= PartialLoadThreshold && fileLength <= MaxArrayBytes)
+            return Parse(headerPath, ct);
+
+        var header = layout.Header;
+        var budget = (long)layout.Offset
+                     + (long)header.Width * header.Height * header.Depth * header.Datatype.BytesPerVoxel();
+        if (budget > MaxArrayBytes)
+            return Parse(headerPath, ct); // volume 0 itself doesn't fit — full path reports it
+
+        var storage = new byte[budget];
+        using (var fs = new FileStream(layout.DataPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            if (ReadFully(fs, storage, storage.Length, ct) < storage.Length)
+                return Parse(headerPath, ct); // data file shorter than the header implies
+
+        return new MiqImage
+        {
+            Header = header,
+            Storage = storage,
+            PayloadOffset = layout.Offset,
+            IsPartial = true,
+            // The full parse reads the data file into one byte[].
+            ExpansionBlocked = fileLength > MaxArrayBytes,
+        };
+    }
+
+    /// Analyze/NIfTI-pair layout: vox_offset into an uncompressed .img.
+    private static DetachedLayout? AnalyzeLayout(string hdrPath, byte[] hdr)
+    {
+        var imgPath = DetachedData.AnalyzeImagePath(hdrPath);
+        if (imgPath.EndsWith(".gz", StringComparison.OrdinalIgnoreCase)) return null;
+        var header = NiftiParser.ParsePairHeader(hdr, imgCompressed: false);
+        return new DetachedLayout(header, imgPath, header.VoxOffset);
     }
 
     private static MiqImage ParseAnalyzePair(string hdrPath, byte[] hdr, CancellationToken ct)
@@ -106,9 +174,9 @@ public static class MiqParser
     /// </summary>
     public static MiqImage ParsePartial(string filePath, CancellationToken ct)
     {
-        // Split formats (and data files of a pair) always parse fully.
-        if (MiqFileKindExtensions.FromPath(filePath) is not { } kind)
-            return Parse(filePath, ct);
+        var kind = ResolveKind(ref filePath);
+        if (IsSplit(kind))
+            return ParseDetachedFirstVolume(filePath, kind, ct);
 
         if (kind == MiqFileKind.Nii)
         {

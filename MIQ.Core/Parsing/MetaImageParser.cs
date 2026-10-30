@@ -59,7 +59,8 @@ public static class MetaImageParser
             data = loadDataFile!(dataFile);
             payloadIndex = 0;
         }
-        payloadIndex = PayloadIndex(meta, data.Length, payloadIndex, payloadBytes);
+        // At most data.Length, so it fits an int.
+        payloadIndex = (int)PayloadIndex(meta, data.Length, payloadIndex, payloadBytes);
 
         byte[] storage;
         int payloadOffset;
@@ -100,19 +101,40 @@ public static class MetaImageParser
     /// tail. Any other value keeps <paramref name="natural"/>: right after the
     /// `ElementDataFile` line, or the start of a detached file. -1 is ignored for
     /// compressed data, where MetaIO would seek back by the decompressed size.
-    private static int PayloadIndex(MetaImageParsedHeader meta, int dataLength, int natural, long payloadBytes)
+    /// <paramref name="dataLength"/> is a long so the volume-0-first load can place
+    /// the payload in a data file too large to read whole.
+    private static long PayloadIndex(MetaImageParsedHeader meta, long dataLength, int natural, long payloadBytes)
     {
         switch (meta.HeaderSize)
         {
             case long skip and > 0:
                 if (skip > dataLength) throw MiqException.TruncatedData();
-                return (int)skip;
+                return skip;
             case -1 when !meta.Compressed:
                 if (dataLength < payloadBytes) throw MiqException.TruncatedData();
-                return (int)(dataLength - payloadBytes);
+                return dataLength - payloadBytes;
             default:
                 return natural;
         }
+    }
+
+    /// For the volume-0-first load of a detached header: the image header, the data
+    /// file and where its voxels start, without reading them. <paramref name="locate"/>
+    /// resolves `ElementDataFile` to a path and that file's length. Null when the
+    /// voxels can't be read one volume at a time: compressed, LOCAL, or channels
+    /// shown as volumes (interleaved per voxel).
+    internal static DetachedLayout? RawLayout(byte[] header, Func<string, (string Path, long Length)> locate)
+    {
+        var (fields, _) = SplitHeader(header);
+        var meta = BuildParsedHeader(fields, detached: true);
+        if (meta.DataFile is not { } name || meta.Compressed || Strides(meta) is not null) return null;
+
+        long payloadBytes = meta.ElementType.BytesPerVoxel() * (long)meta.Channels;
+        foreach (var s in meta.Sizes) payloadBytes *= s;
+        var (path, length) = locate(name);
+        var offset = PayloadIndex(meta, length, 0, payloadBytes);
+        if (offset > int.MaxValue) return null;
+        return new DetachedLayout(BuildMiqHeader(meta, (int)offset), path, (int)offset);
     }
 
     /// The `ElementDataFile` value of a header, or null when it is LOCAL or missing.

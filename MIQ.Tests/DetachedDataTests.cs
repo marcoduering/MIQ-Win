@@ -304,6 +304,54 @@ public sealed class DetachedDataTests : IDisposable
         Assert.True(DetachedData.LooksLikeAnalyzeHeader(Write("a.hdr", AnalyzeHeader(nifti: false))));
     }
 
+    [Theory]
+    [InlineData(40, 0)]      // dim[0] = 0
+    [InlineData(70, 1)]      // DT_BINARY (1-bit): not a datatype the parser reads
+    [InlineData(72, 8)]      // bitpix disagrees with int16
+    public void HdrStartingWith348_ButInvalid_IsNotAnalyze(int offset, short value)
+    {
+        var good = AnalyzeHeader(nifti: false);
+        Assert.True(DetachedData.LooksLikeAnalyzeHeader(Write("good.hdr", good)));
+
+        var bad = (byte[])good.Clone();
+        BinaryPrimitives.WriteInt16LittleEndian(bad.AsSpan(offset), value);
+        var hdr = Write("bad.hdr", bad);
+        Assert.False(DetachedData.LooksLikeAnalyzeHeader(hdr));
+        Assert.Null(DetachedData.HeaderFor(Write("bad.img", Voxels())));
+    }
+
+    [Fact]
+    public void ShortHdr_IsNotAnalyze()
+    {
+        Assert.False(DetachedData.LooksLikeAnalyzeHeader(Write("short.hdr", AnalyzeHeader(nifti: false)[..347])));
+    }
+
+    [Fact]
+    public void ImgGz_IsClaimed_OnlyWhenNoPlainImg()
+    {
+        var hdr = Write("g.hdr", AnalyzeHeader(nifti: false));
+        var gz = Write("g.img.gz", Gzip(Voxels()));
+        Assert.Equal(hdr, DetachedData.HeaderFor(gz));
+
+        // With both present the header reads g.img, so g.img.gz isn't its data.
+        var img = Write("g.img", Voxels());
+        Assert.Equal(hdr, DetachedData.HeaderFor(img));
+        Assert.Null(DetachedData.HeaderFor(gz));
+    }
+
+    [Theory]
+    [InlineData("/v.raw")]
+    [InlineData("C:v.raw")]
+    [InlineData("a|b.raw")]
+    [InlineData("a\"b.raw")]
+    public void OddDataFileNames_FailWithAMessage(string dataFile)
+    {
+        // net462 throws ArgumentException for some of these; it must surface as a
+        // MiqException either way, never a raw BCL exception.
+        var mhd = WriteText("odd.mhd", Mhd(dataFile));
+        Assert.Throws<MiqException>(() => MiqParser.Parse(mhd));
+    }
+
     [Fact]
     public void DataFile_WithoutClaimingHeader_IsNotOurs()
     {

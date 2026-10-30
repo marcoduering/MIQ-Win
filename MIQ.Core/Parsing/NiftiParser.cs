@@ -35,17 +35,7 @@ public static class NiftiParser
     /// vox_offset is an offset into the .img, usually 0.
     public static MiqImage ParsePair(byte[] hdr, byte[] img, bool imgCompressed)
     {
-        if (hdr.Length < 4) throw MiqException.TruncatedData();
-        var headerSizeLE = MiqBinaryReader.Int32(hdr, 0, littleEndian: true);
-        var headerSizeBE = MiqBinaryReader.Int32(hdr, 0, littleEndian: false);
-        if (headerSizeLE != 348 && headerSizeBE != 348)
-            throw MiqException.InvalidHeaderSize(headerSizeLE);
-
-        var isNifti = hdr.Length >= 348 && hdr[344] == 'n' && hdr[345] == 'i' && hdr[346] == '1';
-        var label = (isNifti ? "NIfTI-1 pair" : "Analyze 7.5") + (imgCompressed ? ", compressed .img" : "");
-        var header = ParseNifti1Header(hdr, littleEndian: headerSizeLE == 348, label, pair: true, analyze: !isNifti);
-        MiqParser.ValidateDimensionExtent(header.Dimensions, header.Datatype.BytesPerVoxel());
-        MiqParser.ValidateSlicePlaneExtent(header.Width, header.Height, header.Depth);
+        var header = ParsePairHeader(hdr, imgCompressed);
 
         var volumeBytes = (long)header.Width * header.Height * header.Depth
                           * header.Datatype.BytesPerVoxel();
@@ -58,6 +48,24 @@ public static class NiftiParser
             Storage = img,
             PayloadOffset = header.VoxOffset,
         };
+    }
+
+    /// The header of a split pair, validated exactly as <see cref="ParsePair"/> does.
+    /// Also decides whether a <c>.hdr</c> is ours (<see cref="DetachedData.LooksLikeAnalyzeHeader"/>).
+    internal static MiqHeader ParsePairHeader(byte[] hdr, bool imgCompressed)
+    {
+        if (hdr.Length < 4) throw MiqException.TruncatedData();
+        var headerSizeLE = MiqBinaryReader.Int32(hdr, 0, littleEndian: true);
+        var headerSizeBE = MiqBinaryReader.Int32(hdr, 0, littleEndian: false);
+        if (headerSizeLE != 348 && headerSizeBE != 348)
+            throw MiqException.InvalidHeaderSize(headerSizeLE);
+
+        var isNifti = hdr.Length >= 348 && hdr[344] == 'n' && hdr[345] == 'i' && hdr[346] == '1';
+        var label = (isNifti ? "NIfTI-1 pair" : "Analyze 7.5") + (imgCompressed ? ", compressed .img" : "");
+        var header = ParseNifti1Header(hdr, littleEndian: headerSizeLE == 348, label, pair: true, analyze: !isNifti);
+        MiqParser.ValidateDimensionExtent(header.Dimensions, header.Datatype.BytesPerVoxel());
+        MiqParser.ValidateSlicePlaneExtent(header.Width, header.Height, header.Depth);
+        return header;
     }
 
     /// Pass <paramref name="compressed"/> correctly: partial loads keep this header

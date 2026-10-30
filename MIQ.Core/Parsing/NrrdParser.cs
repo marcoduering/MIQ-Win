@@ -69,6 +69,30 @@ public static class NrrdParser
         return DataFileField(fields) is { } name && !DetachedData.IsMultiFile(name) ? name : null;
     }
 
+    /// For the volume-0-first load of a detached header: the image header, the data
+    /// file and where its voxels start, without reading them. <paramref name="locate"/>
+    /// resolves `data file:` to a path and that file's length. Null when the voxels
+    /// can't be read one volume at a time: gzip, a `line skip` (needs the data to
+    /// count lines), or a volume axis that isn't the slowest (e.g. a DWI list axis first).
+    internal static DetachedLayout? RawLayout(byte[] header, Func<string, (string Path, long Length)> locate)
+    {
+        var (headerText, _) = SplitHeader(header, detached: true);
+        var lines = headerText.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        if (lines.Length == 0 || !lines[0].StartsWith("NRRD000", StringComparison.Ordinal))
+            throw new MiqException(
+                "NRRD magic line not found; file does not appear to be NRRD format.");
+        var nrrd = BuildParsedHeader(ParseFields(lines), detached: true);
+        if (nrrd.Encoding != NrrdEncoding.Raw || nrrd.LineSkip > 0) return null;
+
+        var (path, length) = locate(nrrd.DataFile!);
+        var offset = SkipBytes(nrrd, length, 0, nrrd.ByteSkip);
+        if (offset > int.MaxValue) return null;
+        var descriptor = BuildMiqHeader(nrrd, (int)offset);
+        return descriptor.Strides is null
+            ? new DetachedLayout(descriptor.Header, path, (int)offset)
+            : null;
+    }
+
     // ── Loading ──────────────────────────────────────────────────────────────
 
     private static (NrrdParsedHeader nrrd, byte[] storage, int payloadOffset) LoadNrrd(
@@ -96,7 +120,8 @@ public static class NrrdParser
             byteSkip = nrrd.ByteSkip;
             if (nrrd.Encoding == NrrdEncoding.Raw)
             {
-                payloadIndex = SkipBytes(nrrd, data.Length, payloadIndex, byteSkip);
+                // At most data.Length, so it fits an int.
+                payloadIndex = (int)SkipBytes(nrrd, data.Length, payloadIndex, byteSkip);
                 byteSkip = 0;
             }
         }
@@ -133,17 +158,19 @@ public static class NrrdParser
         return index;
     }
 
-    private static int SkipBytes(NrrdParsedHeader nrrd, int dataLength, int index, long byteSkip)
+    /// <paramref name="dataLength"/> is a long so the volume-0-first load can place
+    /// the payload in a data file too large to read whole.
+    private static long SkipBytes(NrrdParsedHeader nrrd, long dataLength, int index, long byteSkip)
     {
         if (byteSkip == -1)
         {
             long payloadBytes = nrrd.Datatype.BytesPerVoxel();
             foreach (var s in nrrd.Sizes) payloadBytes *= s;
-            if (dataLength - (long)index < payloadBytes) throw MiqException.TruncatedData();
-            return (int)(dataLength - payloadBytes);
+            if (dataLength - index < payloadBytes) throw MiqException.TruncatedData();
+            return dataLength - payloadBytes;
         }
-        if (byteSkip < 0 || byteSkip > dataLength - (long)index) throw MiqException.TruncatedData();
-        return index + (int)byteSkip;
+        if (byteSkip < 0 || byteSkip > dataLength - index) throw MiqException.TruncatedData();
+        return index + byteSkip;
     }
 
     // Returns the header text and the byte offset where the payload begins. A
